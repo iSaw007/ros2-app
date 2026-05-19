@@ -12,14 +12,19 @@ const poseListener = new ROSLIB.Topic({
 
 /**
  * Subscribes to pose updates.
- * @param {function} callback - Function called with (x, y) coordinates.
+ * @param {function} callback - Function called with (x, y, yaw) values.
  * @returns {object} The listener topic object (useful for unsubscribing).
  */
 export const subscribeToPose = (callback) => {
   poseListener.subscribe((message) => {
     const x = message.pose.pose.position.x;
     const y = message.pose.pose.position.y;
-    callback(x, y);
+    
+    // Extract yaw heading from quaternion (planar robot)
+    const q = message.pose.pose.orientation;
+    const yaw = Math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+    
+    callback(x, y, yaw);
   });
   
   return poseListener;
