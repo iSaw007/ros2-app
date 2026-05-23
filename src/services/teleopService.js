@@ -2,11 +2,11 @@ import * as ROSLIB from 'roslib';
 import ros from './rosConnection.js';
 
 // This service handles sending velocity commands to the robot.
-// It publishes to the '/cmd_vel' topic.
+// It publishes directly to the diff drive controller command topic.
 
 const cmdVel = new ROSLIB.Topic({
   ros: ros,
-  name: '/cmd_vel',
+  name: '/diff_drive_controller/cmd_vel_unstamped',
   messageType: 'geometry_msgs/msg/Twist'
 });
 

@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { subscribeToPose, unsubscribeFromPose } from '../services/telemetryService';
 
-export default function MapRenderer({ mapData }) {
+export default function MapRenderer({ mapData, onMapDoubleClick, targetPose }) {
   const containerRef = useRef(null);
   const canvasRef = useRef(null);
   const offscreenCanvasRef = useRef(null);
@@ -158,8 +158,38 @@ export default function MapRenderer({ mapData }) {
       ctx.restore();
     }
 
+    // 3. Overlay target waypoint
+    if (targetPose && mapData && mapData.info) {
+      const { resolution, origin } = mapData.info;
+      const height = mapData.info.height;
+
+      const targetPx = (targetPose.x - origin.position.x) / resolution;
+      const targetPy = height - 1 - ((targetPose.y - origin.position.y) / resolution);
+
+      ctx.save();
+      ctx.translate(targetPx, targetPy);
+
+      // Draw red crosshair target marker
+      ctx.beginPath();
+      ctx.arc(0, 0, 6, 0, 2 * Math.PI);
+      ctx.strokeStyle = '#ef4444'; // Red
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(-10, 0);
+      ctx.lineTo(10, 0);
+      ctx.moveTo(0, -10);
+      ctx.lineTo(0, 10);
+      ctx.strokeStyle = '#ef4444';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      ctx.restore();
+    }
+
     ctx.restore();
-  }, [pan, zoom, robotPose, mapData]);
+  }, [pan, zoom, robotPose, mapData, targetPose]);
 
   // Handle drag-to-pan
   const handleMouseDown = (e) => {
@@ -177,6 +207,26 @@ export default function MapRenderer({ mapData }) {
 
   const handleMouseUp = () => {
     setDragging(false);
+  };
+
+  const handleDoubleClick = (e) => {
+    if (!mapData || !mapData.info || !onMapDoubleClick) return;
+    
+    const rect = canvasRef.current.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+    
+    // Reverse pan and zoom to get canvas pixel coordinates
+    const canvasX = (mouseX - pan.x) / zoom;
+    const canvasY = (mouseY - pan.y) / zoom;
+    
+    const { resolution, origin, height } = mapData.info;
+    
+    // Convert back to ROS world coordinates
+    const worldX = (canvasX * resolution) + origin.position.x;
+    const worldY = origin.position.y + ((height - 1 - canvasY) * resolution);
+    
+    onMapDoubleClick(worldX, worldY);
   };
 
   // Handle scroll-wheel-to-zoom
@@ -227,6 +277,7 @@ export default function MapRenderer({ mapData }) {
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseUp}
         onWheel={handleWheel}
+        onDoubleClick={handleDoubleClick}
         className="w-full h-full cursor-grab active:cursor-grabbing"
       />
       
