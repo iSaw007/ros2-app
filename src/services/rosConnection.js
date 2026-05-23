@@ -4,7 +4,7 @@ import * as ROSLIB from 'roslib';
 // It shares a single 'ros' instance across the application.
 
 const ros = new ROSLIB.Ros({
-  url: 'ws://localhost:9090'
+  url: `ws://${import.meta.env.VITE_ROS_BRIDGE_IP}:9090`
 });
 
 ros.on('connection', () => {
