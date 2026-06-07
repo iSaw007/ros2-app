@@ -268,6 +268,21 @@ export default function MapRenderer({ mapData, onMapDoubleClick, targetPose }) {
     });
   };
 
+  const centerOnRobot = () => {
+    if (!robotPose || !mapData || !mapData.info || !containerRef.current) return;
+    const { resolution, origin, height } = mapData.info;
+    const containerWidth  = containerRef.current.clientWidth;
+    const containerHeight = containerRef.current.clientHeight;
+    const targetZoom = 4;
+    const robotPx = (robotPose.x - origin.position.x) / resolution;
+    const robotPy = height - 1 - ((robotPose.y - origin.position.y) / resolution);
+    setZoom(targetZoom);
+    setPan({
+      x: containerWidth  / 2 - robotPx * targetZoom,
+      y: containerHeight / 2 - robotPy * targetZoom,
+    });
+  };
+
   return (
     <div className="relative w-full h-[550px] bg-slate-950 rounded-xl overflow-hidden shadow-lg border border-slate-800" ref={containerRef}>
       <canvas
@@ -310,6 +325,15 @@ export default function MapRenderer({ mapData, onMapDoubleClick, targetPose }) {
         >
           🔄
         </button>
+        {robotPose && (
+          <button
+            onClick={centerOnRobot}
+            className="w-10 h-10 flex items-center justify-center bg-blue-700 hover:bg-blue-600 text-white rounded-lg border border-blue-600 shadow-md transition-all cursor-pointer"
+            title="Center on Robot"
+          >
+            🎯
+          </button>
+        )}
       </div>
 
       {/* Telemetry info card */}

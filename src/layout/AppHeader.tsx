@@ -1,12 +1,30 @@
 import { Link, useLocation } from "react-router";
 import { ThemeToggleButton } from "../components/common/ThemeToggleButton";
 import { useSidebar } from "../context/SidebarContext";
+import { useRosStatus } from "../context/RosStatusContext";
 
 const titleByPath: Record<string, string> = {
   "/": "Robot Overview",
   "/teleop": "Teleop",
   "/navigation": "Navigation",
   "/docking": "Docking",
+};
+
+const ConnectionPill: React.FC = () => {
+  const { status } = useRosStatus();
+
+  const config = {
+    connected:    { dot: "bg-green-500",                        label: "Connected",     border: "border-green-200 dark:border-green-800",  text: "text-green-700 dark:text-green-300" },
+    connecting:   { dot: "bg-amber-400 animate-pulse",          label: "Reconnecting…", border: "border-amber-200 dark:border-amber-800",   text: "text-amber-700 dark:text-amber-300" },
+    disconnected: { dot: "bg-red-500",                          label: "Offline",       border: "border-red-200 dark:border-red-800",      text: "text-red-700 dark:text-red-300" },
+  }[status];
+
+  return (
+    <span className={`hidden items-center gap-1.5 rounded-full border bg-gray-50 px-3 py-1 text-xs font-medium dark:bg-gray-800 sm:inline-flex ${config.border} ${config.text}`}>
+      <span className={`inline-block h-2 w-2 rounded-full ${config.dot}`} />
+      {config.label}
+    </span>
+  );
 };
 
 const AppHeader: React.FC = () => {
@@ -19,7 +37,6 @@ const AppHeader: React.FC = () => {
       toggleSidebar();
       return;
     }
-
     toggleMobileSidebar();
   };
 
@@ -62,9 +79,7 @@ const AppHeader: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-2">
-          <span className="hidden rounded-full border border-gray-200 bg-gray-50 px-3 py-1 text-xs font-medium text-gray-600 dark:border-gray-800 dark:bg-gray-800 dark:text-gray-300 sm:inline-flex">
-            Live robot control
-          </span>
+          <ConnectionPill />
           <ThemeToggleButton />
         </div>
       </div>
@@ -73,3 +88,4 @@ const AppHeader: React.FC = () => {
 };
 
 export default AppHeader;
+

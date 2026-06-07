@@ -33,3 +33,10 @@ export const startDocking = (dockId = 'default', cancelNav = true, onFeedback, o
     }
   );
 };
+
+/**
+ * Cancels the active docking action goal.
+ */
+export const cancelDocking = () => {
+  dockAction.cancel();
+};

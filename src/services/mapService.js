@@ -25,3 +25,10 @@ export const getMapData = (callback, unsubscribeImmediately = true) => {
     }
   });
 };
+
+/**
+ * Unsubscribes from map updates.
+ */
+export const unsubscribeFromMap = () => {
+  mapListener.unsubscribe();
+};
