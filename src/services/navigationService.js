@@ -1,5 +1,5 @@
 import * as ROSLIB from 'roslib';
-import ros from './rosConnection.js';
+import ros, { sharedTopic } from './rosConnection.js';
 
 // Nav2 point-to-point navigation and the back-up recovery behaviour.
 //
@@ -24,6 +24,31 @@ const backupAction = new ROSLIB.Action({
   name: '/backup',
   actionType: 'nav2_msgs/action/BackUp',
 });
+
+// The path the planner intends to follow, republished on every replan.
+//
+// Subscribed only while a goal is actually running: it is a few hundred poses
+// of pure diagnostics, worth nothing to an idle operator, and the same
+// spend-it-where-it-earns-its-keep reasoning applies here as everywhere else.
+const planTopic = sharedTopic({
+  name: '/plan',
+  messageType: 'nav_msgs/msg/Path',
+});
+
+/**
+ * Subscribes to the current planned path.
+ * @param {function} callback Called with an array of {x, y} in map coordinates.
+ * @returns {function} Unsubscribe.
+ */
+export const subscribeToPlan = (callback) =>
+  planTopic.subscribe((message) =>
+    callback(
+      (message.poses ?? []).map((entry) => ({
+        x: entry.pose.position.x,
+        y: entry.pose.position.y,
+      })),
+    ),
+  );
 
 let navGoalId = null;
 let backupGoalId = null;

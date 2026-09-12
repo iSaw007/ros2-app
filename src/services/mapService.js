@@ -20,6 +20,16 @@ const mapTopic = sharedTopic({
   messageType: 'nav_msgs/msg/OccupancyGrid',
   cache: true,
   oneShot: true,
+  // map_server latches the grid and publishes it once. Matching its
+  // TRANSIENT_LOCAL durability is what makes the retained message reach a
+  // subscriber that connects afterwards — which is almost always, since the
+  // robot is usually already running when a browser opens.
+  qos: {
+    history: 'keep_last',
+    depth: 1,
+    reliability: 'reliable',
+    durability: 'transient_local',
+  },
 });
 
 /**
@@ -35,3 +45,35 @@ export const refreshMap = () => mapTopic.refresh();
 
 /** The cached grid, or null if none has been received yet. */
 export const getCachedMap = () => mapTopic.getCached();
+
+/**
+ * A short identifier for the loaded map.
+ *
+ * Saved waypoints are coordinates in the map frame, which makes them
+ * meaningless against a different map: re-run SLAM, get an origin a few
+ * centimetres off, and every stored location quietly points somewhere else. An
+ * OccupancyGrid carries no name or id, so one is derived from its geometry plus
+ * a cheap checksum over a strided sample of the cells.
+ *
+ * This identifies a map well enough to catch the case that matters — a
+ * different map loaded than the one a location was saved against. Two genuinely
+ * distinct maps that share dimensions, resolution, origin AND sample checksum
+ * would collide, which is unlikely enough to accept and not worth hashing
+ * hundreds of kilobytes on every comparison to rule out.
+ */
+export const mapFingerprint = (message) => {
+  if (!message?.info) return null;
+  const { width, height, resolution, origin } = message.info;
+
+  let checksum = 0;
+  const cells = message.data ?? [];
+  // Every 97th cell: a prime stride, so the sample does not align with the
+  // grid's row width and miss whole structural features.
+  for (let i = 0; i < cells.length; i += 97) {
+    checksum = (checksum + (cells[i] + 1) * (i + 1)) % 1000000007;
+  }
+
+  const ox = Number(origin?.position?.x ?? 0).toFixed(3);
+  const oy = Number(origin?.position?.y ?? 0).toFixed(3);
+  return `${width}x${height}@${Number(resolution).toFixed(3)}+${ox},${oy}#${checksum}`;
+};

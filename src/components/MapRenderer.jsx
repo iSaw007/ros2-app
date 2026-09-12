@@ -1,5 +1,10 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { subscribeToPose, getLastPose } from '../services/telemetryService';
+import {
+  subscribeToPose,
+  getLastPose,
+  subscribeToFootprintRadius,
+  DEFAULT_FOOTPRINT_RADIUS_M,
+} from '../services/telemetryService';
 import { IconButton } from './ui/Button';
 import { CrosshairIcon, FitIcon, MinusIcon, PlusIcon } from './ui/Icons';
 
@@ -19,10 +24,22 @@ const readMapPalette = () => {
   };
 };
 
+// Pointer travel below this is treated as a click rather than a pan.
+const DRAG_SLOP_PX = 4;
+
 const ZOOM_MIN = 0.2;
 const ZOOM_MAX = 60;
 
-export default function MapRenderer({ mapData, onWaypoint, targetPose }) {
+export default function MapRenderer({
+  mapData,
+  onPick,
+  targetPose,
+  plannedPath,
+  pendingGoal,
+  savedLocations = [],
+  hoveredLocation = null,
+  children,
+}) {
   const containerRef = useRef(null);
   const canvasRef = useRef(null);
   const gridCanvasRef = useRef(null);
@@ -31,11 +48,14 @@ export default function MapRenderer({ mapData, onWaypoint, targetPose }) {
   const [view, setView] = useState({ zoom: 1, x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
   const dragOrigin = useRef({ x: 0, y: 0 });
+  const pressOrigin = useRef(null);
   const [robotPose, setRobotPose] = useState(getLastPose);
   const [cursorWorld, setCursorWorld] = useState(null);
+  const [footprintRadius, setFootprintRadius] = useState(DEFAULT_FOOTPRINT_RADIUS_M);
   const [size, setSize] = useState({ width: 0, height: 0 });
 
   useEffect(() => subscribeToPose(setRobotPose), []);
+  useEffect(() => subscribeToFootprintRadius(setFootprintRadius), []);
 
   // Track the container's real size so the canvas stays sharp when the window,
   // the sidebar, or the panel around it changes.
@@ -161,6 +181,100 @@ export default function MapRenderer({ mapData, onWaypoint, targetPose }) {
       ];
     };
 
+    // The planner's intended route, drawn under the markers so it never
+    // obscures the robot or the goal. Line width is divided by the zoom so the
+    // path stays one consistent weight on screen at any magnification.
+    if (mapData?.info && plannedPath && plannedPath.length > 1) {
+      context.strokeStyle = 'rgba(96,165,250,0.9)';
+      context.lineWidth = 2 / view.zoom;
+      context.lineJoin = 'round';
+      context.lineCap = 'round';
+      context.beginPath();
+      plannedPath.forEach((point, index) => {
+        const [px, py] = toPixels(point.x, point.y);
+        if (index === 0) context.moveTo(px, py);
+        else context.lineTo(px, py);
+      });
+      context.stroke();
+    }
+
+    // Saved locations, drawn small and quiet so they never compete with the
+    // robot or an active goal.
+    if (mapData?.info && savedLocations.length) {
+      savedLocations.forEach((place) => {
+        const [px, py] = toPixels(place.x, place.y);
+        const isHovered = hoveredLocation === place.id;
+        const r = (isHovered ? 7 : 4.5) / view.zoom;
+
+        context.beginPath();
+        context.arc(px, py, r, 0, Math.PI * 2);
+        context.fillStyle = isHovered ? 'rgba(52,208,127,0.35)' : 'rgba(148,163,184,0.25)';
+        context.fill();
+        context.lineWidth = 1.5 / view.zoom;
+        context.strokeStyle = isHovered ? '#34d07f' : 'rgba(148,163,184,0.85)';
+        context.stroke();
+
+        if (isHovered) {
+          // Straight line from the robot, not the route Nav2 would take. It
+          // answers "where is that, and roughly how far" while the pointer is
+          // moving down a list; planning a real path for every hover would ask
+          // the robot to do real work for a glance.
+          if (robotPose) {
+            const [rx, ry] = toPixels(robotPose.x, robotPose.y);
+            context.save();
+            context.setLineDash([6 / view.zoom, 5 / view.zoom]);
+            context.strokeStyle = 'rgba(52,208,127,0.75)';
+            context.lineWidth = 1.5 / view.zoom;
+            context.beginPath();
+            context.moveTo(rx, ry);
+            context.lineTo(px, py);
+            context.stroke();
+            context.restore();
+          }
+
+          context.font = `${12 / view.zoom}px system-ui, sans-serif`;
+          context.fillStyle = '#34d07f';
+          context.textAlign = 'center';
+          context.fillText(place.name, px, py - 11 / view.zoom);
+        }
+      });
+    }
+
+    // The point awaiting confirmation, distinct from a goal already sent.
+    if (mapData?.info && pendingGoal) {
+      const [px, py] = toPixels(pendingGoal.x, pendingGoal.y);
+
+      // Same straight-line cue as a hovered saved location: it answers "where
+      // is that relative to the robot, and how far" before anything is
+      // committed. Not the route Nav2 would take — nothing has been planned yet.
+      if (robotPose) {
+        const [rx, ry] = toPixels(robotPose.x, robotPose.y);
+        context.save();
+        context.setLineDash([6 / view.zoom, 5 / view.zoom]);
+        context.strokeStyle = 'rgba(240,161,50,0.75)';
+        context.lineWidth = 1.5 / view.zoom;
+        context.beginPath();
+        context.moveTo(rx, ry);
+        context.lineTo(px, py);
+        context.stroke();
+        context.restore();
+      }
+
+      const r = 8 / view.zoom;
+      context.save();
+      context.setLineDash([4 / view.zoom, 4 / view.zoom]);
+      context.strokeStyle = '#f0a132';
+      context.lineWidth = 1.75 / view.zoom;
+      context.beginPath();
+      context.arc(px, py, r, 0, Math.PI * 2);
+      context.stroke();
+      context.restore();
+      context.beginPath();
+      context.arc(px, py, 2 / view.zoom, 0, Math.PI * 2);
+      context.fillStyle = '#f0a132';
+      context.fill();
+    }
+
     if (mapData?.info && targetPose) {
       const [px, py] = toPixels(targetPose.x, targetPose.y);
       const r = 7 / view.zoom;
@@ -181,24 +295,36 @@ export default function MapRenderer({ mapData, onWaypoint, targetPose }) {
       const [px, py] = toPixels(robotPose.x, robotPose.y);
       const scale = 1 / view.zoom;
 
+      // The footprint is drawn in map units, so it grows and shrinks with the
+      // map exactly as the robot would — which is the point: it shows whether
+      // the robot fits, not merely where it is. Below a few screen pixels it
+      // stops being a shape at all, so it is floored at a visible size to keep
+      // the robot findable when zoomed right out.
+      const radiusCells = footprintRadius / mapData.info.resolution;
+      const drawnRadius = Math.max(radiusCells, 5 * scale);
+
       context.save();
       context.translate(px, py);
       // Yaw is counter-clockwise in the world; canvas y points down.
       context.rotate(-robotPose.yaw);
 
-      context.fillStyle = 'rgba(59,130,246,0.22)';
       context.beginPath();
-      context.arc(0, 0, 11 * scale, 0, Math.PI * 2);
+      context.arc(0, 0, drawnRadius, 0, Math.PI * 2);
+      context.fillStyle = 'rgba(59,130,246,0.20)';
       context.fill();
+      context.lineWidth = 1.25 * scale;
+      context.strokeStyle = 'rgba(59,130,246,0.85)';
+      context.stroke();
 
-      // A wedge pointing along the robot's heading reads as an orientation at a
-      // glance, where a dot plus a line does not.
+      // A heading wedge, sized against the footprint so it stays in proportion
+      // rather than swamping a small robot or vanishing on a large one.
+      const nose = drawnRadius * 0.9;
       context.fillStyle = '#3b82f6';
       context.beginPath();
-      context.moveTo(10 * scale, 0);
-      context.lineTo(-6 * scale, -6 * scale);
-      context.lineTo(-3 * scale, 0);
-      context.lineTo(-6 * scale, 6 * scale);
+      context.moveTo(nose, 0);
+      context.lineTo(-nose * 0.55, -nose * 0.55);
+      context.lineTo(-nose * 0.25, 0);
+      context.lineTo(-nose * 0.55, nose * 0.55);
       context.closePath();
       context.fill();
 
@@ -206,7 +332,7 @@ export default function MapRenderer({ mapData, onWaypoint, targetPose }) {
     }
 
     context.restore();
-  }, [view, size, robotPose, mapData, targetPose]);
+  }, [view, size, robotPose, mapData, targetPose, plannedPath, savedLocations, hoveredLocation, pendingGoal, footprintRadius]);
 
   const toWorld = useCallback((clientX, clientY) => {
     if (!mapData?.info || !canvasRef.current) return null;
@@ -220,14 +346,31 @@ export default function MapRenderer({ mapData, onWaypoint, targetPose }) {
     };
   }, [mapData, view]);
 
-  const handleMouseDown = (event) => {
+  const handlePointerDown = (event) => {
+    // Capture means the rest of the gesture is delivered here even if the
+    // pointer leaves the canvas, so a pan that runs off the edge still ends
+    // cleanly instead of stranding the drag state. It is a convenience, not a
+    // requirement: a browser that refuses the capture must not take the whole
+    // gesture down with it, so a failure here is swallowed deliberately.
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      /* capture unavailable for this pointer; panning still works */
+    }
     setIsDragging(true);
     dragOrigin.current = { x: event.clientX - view.x, y: event.clientY - view.y };
+    pressOrigin.current = { x: event.clientX, y: event.clientY, moved: false };
   };
 
-  const handleMouseMove = (event) => {
+  const handlePointerMove = (event) => {
     setCursorWorld(toWorld(event.clientX, event.clientY));
     if (!isDragging) return;
+    // A few pixels of travel is a pan, not a click. Without this every attempt
+    // to drag the map would also drop a waypoint where the drag began.
+    const press = pressOrigin.current;
+    if (press && Math.hypot(event.clientX - press.x, event.clientY - press.y) > DRAG_SLOP_PX) {
+      press.moved = true;
+    }
     setView((current) => ({
       ...current,
       x: event.clientX - dragOrigin.current.x,
@@ -237,9 +380,33 @@ export default function MapRenderer({ mapData, onWaypoint, targetPose }) {
 
   const endDrag = () => setIsDragging(false);
 
-  const handleDoubleClick = (event) => {
+  /**
+   * A completed press that did not turn into a pan proposes a waypoint.
+   *
+   * Proposes, not sends: the click reports where it landed and what that is in
+   * screen terms, so the page can put a confirmation next to it. Committing a
+   * destination to a moving robot on a single stray click is not a decision an
+   * interface should make on the operator's behalf.
+   */
+  const handlePointerUp = (event) => {
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    } catch {
+      /* nothing was captured */
+    }
+    const press = pressOrigin.current;
+    setIsDragging(false);
+    pressOrigin.current = null;
+    if (!press || press.moved || !onPick) return;
+
     const world = toWorld(event.clientX, event.clientY);
-    if (world && onWaypoint) onWaypoint(world);
+    if (!world) return;
+    const rect = canvasRef.current.getBoundingClientRect();
+    onPick({
+      ...world,
+      screenX: event.clientX - rect.left,
+      screenY: event.clientY - rect.top,
+    });
   };
 
   const zoomAbout = (factor, clientX, clientY) => {
@@ -294,13 +461,18 @@ export default function MapRenderer({ mapData, onWaypoint, targetPose }) {
     >
       <canvas
         ref={canvasRef}
-        onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMove}
-        onMouseUp={endDrag}
-        onMouseLeave={() => { endDrag(); setCursorWorld(null); }}
-        onDoubleClick={handleDoubleClick}
-        className={isDragging ? 'cursor-grabbing' : 'cursor-grab'}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={() => { endDrag(); pressOrigin.current = null; }}
+        onPointerLeave={() => setCursorWorld(null)}
+        /* touch-none stops the browser treating a drag on the map as a page
+           scroll or a pinch, which would otherwise make panning unusable on a
+           tablet. */
+        className={`touch-none ${isDragging ? 'cursor-grabbing' : 'cursor-grab'}`}
       />
+
+      {children}
 
       {/* View controls */}
       <div className="absolute bottom-3 right-3 flex flex-col gap-1.5">

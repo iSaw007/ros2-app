@@ -3,9 +3,11 @@ import { ThemeToggleButton } from "../components/common/ThemeToggleButton";
 import { useSidebar } from "../context/SidebarContext";
 import { useRosStatus } from "../context/RosStatusContext";
 import { useCameraDock } from "../context/CameraDockContext";
+import { useDockState } from "../context/DockStateContext";
 import { IconButton } from "../components/ui/Button";
 import { CameraIcon, CameraOffIcon, CloseIcon, MenuIcon } from "../components/ui/Icons";
-import { StatusLine, type Tone } from "../components/ui/Indicators";
+import { Badge, StatusLine, type Tone } from "../components/ui/Indicators";
+import { DockIcon } from "../components/ui/Icons";
 
 const pageTitles: Record<string, string> = {
   "/": "Overview",
@@ -25,6 +27,7 @@ const AppHeader: React.FC = () => {
   const location = useLocation();
   const { status, url } = useRosStatus();
   const { isOpen: cameraOpen, toggle: toggleCamera } = useCameraDock();
+  const { isDocked } = useDockState();
 
   // The teleop page is the camera, so offering a corner copy of it there would
   // just open a second stream of the same pictures.
@@ -55,6 +58,14 @@ const AppHeader: React.FC = () => {
         {/* The bridge address is worth keeping permanently visible: it is the
             first thing to check when the link will not come up. */}
         <span className="tnum hidden text-[11px] text-faint md:inline">{url}</span>
+        {/* Docked is worth carrying on every page: it changes what the robot
+            will do next, and it is the reason a navigation goal might refuse to
+            start. */}
+        {isDocked && (
+          <Badge tone="ok" className="hidden sm:inline-flex">
+            <DockIcon size={12} /> Docked
+          </Badge>
+        )}
         <StatusLine tone={link.tone} label={link.label} pulse={link.pulse} />
         {cameraToggleApplies && (
           <IconButton

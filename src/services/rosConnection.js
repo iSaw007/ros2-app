@@ -163,8 +163,24 @@ export const callServiceTyped = ({ name, type, args, timeoutMs = 15000 }, onResu
  *                                        which is large and rarely changes.
  * @returns {{subscribe: function, getCached: function, refresh: function, clearCache: function}}
  */
-export const sharedTopic = ({ name, messageType, cache = false, oneShot = false }) => {
-  const topic = new ROSLIB.Topic({ ros, name, messageType });
+export const sharedTopic = ({ name, messageType, cache = false, oneShot = false, qos = null }) => {
+  // roslibjs's Topic always subscribes with rosbridge's default QoS, which is
+  // volatile. That is wrong for a latched (TRANSIENT_LOCAL) publisher such as
+  // the map: the retained message is delivered only to a transient-local
+  // subscriber, so a volatile one hears nothing until the next publish — and
+  // map_server publishes once, at startup. Subscribe a moment late and the map
+  // never arrives at all.
+  //
+  // rosbridge's subscribe op does accept a qos profile, so when one is asked
+  // for the op is sent directly instead of going through Topic.
+  const topic = qos ? null : new ROSLIB.Topic({ ros, name, messageType });
+  const rawId = `subscribe:${name}:${Math.random().toString(36).slice(2)}`;
+  // Messages arrive on the connection as {op, topic, msg}; Topic would unwrap
+  // that for us, so the raw path has to do it itself.
+  const rawHandler = (envelope) => onMessage(envelope?.msg ?? envelope);
+
+  const sendSubscribe = () =>
+    ros.callOnConnection({ op: 'subscribe', id: rawId, topic: name, type: messageType, qos });
 
   const consumers = new Set();
   let cached = null;
@@ -175,25 +191,35 @@ export const sharedTopic = ({ name, messageType, cache = false, oneShot = false 
     // Copy before iterating: a consumer may unsubscribe from inside its callback.
     for (const fn of [...consumers]) fn(message);
 
-    if (oneShot && rosSubscribed) {
-      topic.unsubscribe(onMessage);
-      rosSubscribed = false;
-    }
+    if (oneShot && rosSubscribed) closeRosSubscription();
   };
 
   const openRosSubscription = () => {
     if (rosSubscribed) return;
     rosSubscribed = true;
-    topic.subscribe(onMessage);
+    if (topic) {
+      topic.subscribe(onMessage);
+      return;
+    }
+    ros.on(name, rawHandler);
+    sendSubscribe();
+    // Topic re-subscribes itself after a reconnect; the raw path has to.
+    ros.on('connection', sendSubscribe);
   };
 
   const closeRosSubscription = () => {
     if (!rosSubscribed) return;
-    // Pass the callback explicitly. roslib only tears the subscription down
-    // once no 'message' listeners remain, and it actually detaches ours —
-    // the no-argument form does neither correctly.
-    topic.unsubscribe(onMessage);
     rosSubscribed = false;
+    if (topic) {
+      // Pass the callback explicitly. roslib only tears the subscription down
+      // once no 'message' listeners remain, and it actually detaches ours —
+      // the no-argument form does neither correctly.
+      topic.unsubscribe(onMessage);
+      return;
+    }
+    ros.off(name, rawHandler);
+    ros.off('connection', sendSubscribe);
+    ros.callOnConnection({ op: 'unsubscribe', id: rawId, topic: name });
   };
 
   return {

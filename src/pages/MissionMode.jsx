@@ -10,6 +10,7 @@ import {
 } from '../services/dockingService';
 import { sendBackup, cancelBackup } from '../services/navigationService';
 import { useRosStatus } from '../context/RosStatusContext';
+import { useDockState } from '../context/DockStateContext';
 import { Panel } from '../components/ui/Panel';
 import { Button } from '../components/ui/Button';
 import { Badge, Meter, Readout, StatusLine, EmptyState } from '../components/ui/Indicators';
@@ -90,6 +91,7 @@ const DOCK_IDS = ['default'];
 
 export default function MissionMode() {
   const { isConnected } = useRosStatus();
+  const { reportDocked, reportUndocked } = useDockState();
 
   const [dockId, setDockId] = useState(DOCK_IDS[0]);
   const [logs, setLogs] = useState([]);
@@ -206,6 +208,7 @@ export default function MissionMode() {
           setPipelineState(DOCK_STATES.DOCKED);
           setCompleted(DOCK_PIPELINE.slice(0, -1));
           setPhase('docked');
+          reportDocked();
           appendLog('Docked.', 'success');
         } else if (status === GOAL_STATUS.CANCELED) {
           setPhase('cancelled');
@@ -236,7 +239,7 @@ export default function MissionMode() {
       clearTimeout(probe);
       clearInterval(watchdog);
     };
-  }, [appendLog]);
+  }, [appendLog, reportDocked]);
 
   // A back-up behaviour started here should not outlive the page.
   useEffect(() => () => { cancelBackup(); }, []);

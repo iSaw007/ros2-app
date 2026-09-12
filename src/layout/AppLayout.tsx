@@ -2,6 +2,7 @@ import { Outlet } from "react-router";
 import { SidebarProvider, useSidebar } from "../context/SidebarContext";
 import { RosStatusProvider } from "../context/RosStatusContext";
 import { CameraDockProvider } from "../context/CameraDockContext";
+import { DockStateProvider } from "../context/DockStateContext";
 import { CameraDock } from "../components/CameraDock";
 import AppHeader from "./AppHeader";
 import Backdrop from "./Backdrop";
@@ -36,7 +37,9 @@ const AppLayout: React.FC = () => (
   <RosStatusProvider>
     <SidebarProvider>
       <CameraDockProvider>
-        <LayoutContent />
+        <DockStateProvider>
+          <LayoutContent />
+        </DockStateProvider>
       </CameraDockProvider>
     </SidebarProvider>
   </RosStatusProvider>
