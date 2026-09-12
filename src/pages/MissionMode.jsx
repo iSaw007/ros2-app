@@ -1,274 +1,448 @@
-import React, { useState } from 'react';
-import { startDocking, cancelDocking } from '../services/dockingService';
-import { sendBackup } from '../services/navigationService';
-
-// All states in pipeline order
-const PIPELINE = [
-  'STAGING',
-  'STAGING_CORRECTION',
-  'SEARCHING',
-  'TRACKING',
-  'APPROACH',
-  'DOCKED',
-];
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  startDocking,
+  cancelDocking,
+  watchDockMission,
+  isTerminalStatus,
+  GOAL_STATUS,
+  DOCK_STATES,
+  DOCK_PIPELINE,
+} from '../services/dockingService';
+import { sendBackup, cancelBackup } from '../services/navigationService';
+import { useRosStatus } from '../context/RosStatusContext';
+import { Panel } from '../components/ui/Panel';
+import { Button } from '../components/ui/Button';
+import { Badge, Meter, Readout, StatusLine, EmptyState } from '../components/ui/Indicators';
+import { DockIcon, PlayIcon, StopIcon, WarningIcon } from '../components/ui/Icons';
 
 const STATE_LABELS = {
-  STAGING:             'Staging',
-  STAGING_CORRECTION:  'Correcting',
-  SEARCHING:           'Searching',
-  TRACKING:            'Tracking',
-  APPROACH:            'Approach',
-  DOCKED:              'Docked ✓',
+  [DOCK_STATES.STAGING]: 'Staging',
+  [DOCK_STATES.STAGING_CORRECTION]: 'Correcting',
+  [DOCK_STATES.SEARCHING]: 'Searching',
+  [DOCK_STATES.TRACKING]: 'Tracking',
+  [DOCK_STATES.APPROACH]: 'Approach',
+  [DOCK_STATES.DOCKED]: 'Docked',
+  [DOCK_STATES.LOST]: 'Marker lost',
 };
 
-function StatePipeline({ currentState, completedStates, failed }) {
-  return (
-    <div className="flex items-center gap-1 flex-wrap">
-      {PIPELINE.map((state, i) => {
-        const isActive    = state === currentState;
-        const isComplete  = completedStates.includes(state);
-        const isFailed    = failed && isActive;
-        const isFuture    = !isActive && !isComplete;
+const STATE_HINTS = {
+  [DOCK_STATES.STAGING]: 'Driving to the staging pose under Nav2.',
+  [DOCK_STATES.STAGING_CORRECTION]: 'Adjusting the approach angle before the visual phase.',
+  [DOCK_STATES.SEARCHING]: 'Turning in place, looking for the dock markers.',
+  [DOCK_STATES.TRACKING]: 'Markers acquired — closing on the dock.',
+  [DOCK_STATES.APPROACH]: 'Final alignment and contact.',
+  [DOCK_STATES.DOCKED]: 'Mission complete.',
+  [DOCK_STATES.LOST]: 'Markers out of view — reacquiring before falling back to search.',
+};
 
-        let chipClass = 'px-3 py-1 rounded-full text-xs font-semibold border transition-all ';
-        if (isFailed)    chipClass += 'bg-red-100 border-red-400 text-red-700 dark:bg-red-900/40 dark:text-red-300';
-        else if (isActive)   chipClass += 'bg-blue-100 border-blue-400 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300 ring-2 ring-blue-400/50 animate-pulse';
-        else if (isComplete) chipClass += 'bg-green-100 border-green-400 text-green-700 dark:bg-green-900/40 dark:text-green-300';
-        else                 chipClass += 'bg-gray-100 border-gray-200 text-gray-400 dark:bg-gray-800 dark:border-gray-700 dark:text-gray-500';
+const TRACKING_RANGE_M = 2.0;
+
+// How long to listen before concluding no mission is running. Feedback arrives
+// at roughly 10 Hz, so anything beyond a few hundred milliseconds is generous;
+// this leaves room for a slow first delivery over a congested link.
+const PROBE_WINDOW_MS = 2500;
+
+// If feedback stops without a terminal status, the mission is no longer being
+// reported on. That is not the same as it having finished, and the interface
+// says so rather than inventing an outcome.
+const FEEDBACK_TIMEOUT_MS = 4000;
+
+function Pipeline({ activeState, completed, failed, lost }) {
+  return (
+    <ol className="flex flex-wrap items-center gap-x-1 gap-y-2">
+      {DOCK_PIPELINE.map((state, index) => {
+        const isActive = state === activeState;
+        const isComplete = completed.includes(state);
+
+        let tone = 'border-edge bg-sunken text-faint';
+        if (isActive && failed) tone = 'border-danger/40 bg-danger-soft text-danger';
+        else if (isActive && lost) tone = 'border-warn/40 bg-warn-soft text-warn';
+        else if (isActive) tone = 'border-accent/40 bg-accent-soft text-accent';
+        else if (isComplete) tone = 'border-ok/30 bg-ok-soft text-ok';
 
         return (
           <React.Fragment key={state}>
-            <span className={chipClass}>{STATE_LABELS[state]}</span>
-            {i < PIPELINE.length - 1 && (
-              <span className="text-gray-300 dark:text-gray-600 text-xs">→</span>
+            <li
+              className={`rounded-[4px] border px-2 py-1 text-[11px] font-semibold transition-colors ${tone}`}
+              aria-current={isActive ? 'step' : undefined}
+            >
+              {STATE_LABELS[state]}
+            </li>
+            {index < DOCK_PIPELINE.length - 1 && (
+              <li aria-hidden="true" className="text-[10px] text-faint">·</li>
             )}
           </React.Fragment>
         );
       })}
-    </div>
+    </ol>
   );
 }
 
-function DistanceGauge({ distanceM }) {
-  const MAX_DIST = 2.0;
-  const pct = Math.max(0, Math.min(1, 1 - distanceM / MAX_DIST)) * 100;
-  return (
-    <div className="mt-3">
-      <div className="flex justify-between text-xs text-gray-500 dark:text-gray-400 mb-1">
-        <span>Distance</span>
-        <span className="font-mono">{distanceM.toFixed(2)} m</span>
-      </div>
-      <div className="w-full h-2.5 bg-gray-100 dark:bg-gray-700 rounded-full overflow-hidden">
-        <div
-          className="h-full bg-blue-500 rounded-full transition-all duration-300"
-          style={{ width: `${pct}%` }}
-        />
-      </div>
-      <div className="flex justify-between text-xs text-gray-400 mt-0.5">
-        <span>0 m</span>
-        <span>{MAX_DIST} m</span>
-      </div>
-    </div>
-  );
-}
-
-const LOG_COLORS = {
-  state:   'text-blue-500 dark:text-blue-400',
-  success: 'text-green-600 dark:text-green-400',
-  error:   'text-red-500 dark:text-red-400',
-  info:    'text-gray-600 dark:text-gray-300',
+const LOG_TONES = {
+  state: 'text-accent',
+  success: 'text-ok',
+  error: 'text-danger',
+  warn: 'text-warn',
+  info: 'text-muted',
 };
 
 const DOCK_IDS = ['default'];
 
 export default function MissionMode() {
-  const [logs, setLogs]             = useState([]);
-  const [isDocking, setIsDocking]   = useState(false);
-  const [isDocked, setIsDocked]     = useState(false);
-  const [currentState, setCurrentState] = useState(null);
-  const [completedStates, setCompletedStates] = useState([]);
-  const [distanceM, setDistanceM]   = useState(null);
-  const [failed, setFailed]         = useState(false);
-  const [dockId, setDockId]         = useState('default');
+  const { isConnected } = useRosStatus();
 
-  const appendLog = (text, level = 'info') => {
-    const ts = new Date().toLocaleTimeString();
-    setLogs(prev => [...prev, { text, level, ts, id: Date.now() + Math.random() }]);
-  };
+  const [dockId, setDockId] = useState(DOCK_IDS[0]);
+  const [logs, setLogs] = useState([]);
+
+  // 'probing'  — listening to find out whether a mission is already running
+  // 'idle'     — nothing running
+  // 'running'  — a mission is in progress
+  // 'docked' | 'failed' | 'cancelled' | 'stalled' — terminal
+  const [phase, setPhase] = useState('probing');
+  // True when the mission was already under way when this page loaded, rather
+  // than started from here. Worth showing: it explains a populated interface
+  // the operator did not personally set in motion.
+  const [adopted, setAdopted] = useState(false);
+  const [isUndocking, setIsUndocking] = useState(false);
+
+  const [rawState, setRawState] = useState(null);
+  const [pipelineState, setPipelineState] = useState(null);
+  const [completed, setCompleted] = useState([]);
+  const [distanceM, setDistanceM] = useState(null);
+
+  const logRef = useRef(null);
+  const logCounter = useRef(0);
+  const phaseRef = useRef(phase);
+  const rawStateRef = useRef(null);
+  const pipelineStateRef = useRef(null);
+  const goalIdRef = useRef(null);
+  const lastFeedbackAt = useRef(0);
+
+  useEffect(() => { phaseRef.current = phase; }, [phase]);
+
+  const appendLog = useCallback((text, level = 'info') => {
+    logCounter.current += 1;
+    // Read the counter here, not inside the updater. React runs updaters later,
+    // so two calls batched into one render would both see the already-twice-
+    // incremented ref and produce two entries sharing an id.
+    const id = logCounter.current;
+    const time = new Date().toLocaleTimeString([], { hour12: false });
+    setLogs((previous) => [...previous.slice(-199), { id, text, level, time }]);
+  }, []);
+
+  useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+  }, [logs]);
+
+  const resetMissionView = useCallback(() => {
+    rawStateRef.current = null;
+    pipelineStateRef.current = null;
+    goalIdRef.current = null;
+    setRawState(null);
+    setPipelineState(null);
+    setCompleted([]);
+    setDistanceM(null);
+  }, []);
+
+  // Follow the robot, not this tab's own goal. This is what survives a reload:
+  // the mission's state is republished continuously by the coordinator, so a
+  // page that has just loaded can pick up one already in progress.
+  useEffect(() => {
+    const stop = watchDockMission({
+      onFeedback: ({ goalId, state, distanceM: distance }) => {
+        lastFeedbackAt.current = Date.now();
+        goalIdRef.current = goalId;
+
+        if (phaseRef.current === 'probing' || phaseRef.current === 'idle') {
+          setAdopted(true);
+          setPhase('running');
+          appendLog('Reattached to a docking mission already in progress.', 'warn');
+        } else if (phaseRef.current !== 'running') {
+          setPhase('running');
+        }
+
+        if (state !== rawStateRef.current) {
+          rawStateRef.current = state;
+          setRawState(state);
+          appendLog(
+            STATE_HINTS[state] ?? state,
+            state === DOCK_STATES.LOST ? 'warn' : 'state',
+          );
+        }
+
+        // LOST is a recovery state, not a step: leave the pipeline showing the
+        // phase the mission is still trying to complete.
+        if (state !== DOCK_STATES.LOST && DOCK_PIPELINE.includes(state)) {
+          const previous = pipelineStateRef.current;
+          if (previous !== state) {
+            // Everything before the reported step counts as done. For a mission
+            // adopted mid-flight that is the only way to populate the earlier
+            // steps at all, and for one started here it agrees with what was
+            // actually observed.
+            const reachedIndex = DOCK_PIPELINE.indexOf(state);
+            setCompleted(DOCK_PIPELINE.slice(0, reachedIndex));
+            pipelineStateRef.current = state;
+            setPipelineState(state);
+          }
+        }
+
+        if (distance !== null) setDistanceM(distance);
+      },
+
+      onStatus: ({ goalId, status }) => {
+        // Only act on a transition belonging to the goal currently being
+        // followed. The goal id is learned from feedback, so until that has
+        // arrived no transition can be attributed to this mission — including
+        // the terminal status of the *previous* goal, which the coordinator
+        // republishes as a new mission starts and which would otherwise be
+        // reported as this one having instantly ended.
+        if (!goalIdRef.current || goalId !== goalIdRef.current) return;
+        if (!isTerminalStatus(status)) return;
+
+        if (status === GOAL_STATUS.SUCCEEDED) {
+          rawStateRef.current = DOCK_STATES.DOCKED;
+          pipelineStateRef.current = DOCK_STATES.DOCKED;
+          setRawState(DOCK_STATES.DOCKED);
+          setPipelineState(DOCK_STATES.DOCKED);
+          setCompleted(DOCK_PIPELINE.slice(0, -1));
+          setPhase('docked');
+          appendLog('Docked.', 'success');
+        } else if (status === GOAL_STATUS.CANCELED) {
+          setPhase('cancelled');
+          appendLog('Mission cancelled.', 'warn');
+        } else {
+          setPhase('failed');
+          appendLog('Mission aborted by the coordinator.', 'error');
+        }
+        goalIdRef.current = null;
+      },
+    });
+
+    // Nothing heard in the probe window means nothing is running.
+    const probe = setTimeout(() => {
+      if (phaseRef.current === 'probing') setPhase('idle');
+    }, PROBE_WINDOW_MS);
+
+    // Feedback drying up mid-mission is reported as exactly that.
+    const watchdog = setInterval(() => {
+      if (phaseRef.current !== 'running') return;
+      if (Date.now() - lastFeedbackAt.current < FEEDBACK_TIMEOUT_MS) return;
+      setPhase('stalled');
+      appendLog('Feedback from the coordinator stopped.', 'error');
+    }, 1000);
+
+    return () => {
+      stop();
+      clearTimeout(probe);
+      clearInterval(watchdog);
+    };
+  }, [appendLog]);
+
+  // A back-up behaviour started here should not outlive the page.
+  useEffect(() => () => { cancelBackup(); }, []);
 
   const handleStart = () => {
-    setIsDocking(true);
-    setIsDocked(false);
-    setFailed(false);
-    setCurrentState('STAGING');
-    setCompletedStates([]);
-    setDistanceM(null);
+    setAdopted(false);
+    setPhase('running');
+    lastFeedbackAt.current = Date.now();
+    resetMissionView();
     setLogs([]);
-    appendLog(`Sending goal to dock: "${dockId}"`, 'info');
+    appendLog(`Goal sent for dock "${dockId}".`, 'info');
 
-    startDocking(
+    startDocking({
       dockId,
-      true,
-      (feedback) => {
-        const newState = feedback.state;
-        const dist = feedback.distance_m ?? null;
-
-        setCurrentState(prev => {
-          if (prev && prev !== newState) {
-            setCompletedStates(cs => cs.includes(prev) ? cs : [...cs, prev]);
-            appendLog(`→ ${newState}`, 'state');
-          }
-          return newState;
-        });
-        if (dist !== null) setDistanceM(dist);
+      cancelNav: true,
+      onResult: ({ success, message }) => {
+        // The status topic reports the outcome; this only adds the
+        // coordinator's own explanation, which the status code lacks.
+        if (!success && message) appendLog(message, 'error');
       },
-      (result) => {
-        setIsDocking(false);
-        if (result.success) {
-          setIsDocked(true);
-          setCurrentState('DOCKED');
-          setCompletedStates(PIPELINE.slice(0, -1));
-          appendLog('Docking completed successfully!', 'success');
-        } else {
-          setFailed(true);
-          appendLog(`Mission failed: ${result.message ?? 'unknown reason'}`, 'error');
-        }
-      }
-    );
+    });
   };
 
   const handleCancel = () => {
-    cancelDocking();
-    setIsDocking(false);
-    setFailed(true);
-    appendLog('Mission cancelled by user.', 'error');
+    appendLog('Cancel requested.', 'warn');
+    cancelDocking(({ accepted, count, error }) => {
+      if (!accepted) appendLog(`Cancel failed: ${error ?? 'unknown reason'}`, 'error');
+      else if (count === 0) appendLog('No active mission to cancel.', 'warn');
+      else appendLog(`Cancelling ${count} goal${count === 1 ? '' : 's'}.`, 'warn');
+    });
   };
 
   const handleUndock = () => {
-    appendLog('Undocking…', 'info');
-    // Fire the action but don't wait for its callback since the server doesn't exist yet
-    sendBackup(0.4, 0.1, null, () => {});
-    
-    // Immediately reset UI state
-    setIsDocked(false);
-    setCurrentState(null);
-    setCompletedStates([]);
-    appendLog('UI reset (backup action simulated).', 'success');
+    setIsUndocking(true);
+    appendLog('Backing out of the dock.', 'info');
+
+    sendBackup({
+      distance: 0.4,
+      speed: 0.1,
+      onResult: ({ success, message }) => {
+        setIsUndocking(false);
+        if (success) {
+          resetMissionView();
+          setPhase('idle');
+          appendLog('Clear of the dock.', 'success');
+        } else {
+          appendLog(message || 'Back-up behaviour did not complete.', 'error');
+        }
+      },
+    });
   };
 
-  const showGauge = distanceM !== null && (currentState === 'TRACKING' || currentState === 'APPROACH');
+  const isRunning = phase === 'running';
+  const isDocked = phase === 'docked';
+  const failed = phase === 'failed' || phase === 'stalled';
+  const isLost = rawState === DOCK_STATES.LOST;
+  const showRange =
+    distanceM !== null &&
+    [DOCK_STATES.TRACKING, DOCK_STATES.APPROACH, DOCK_STATES.LOST].includes(rawState);
+
+  const statusTone = isDocked
+    ? 'ok'
+    : failed
+      ? 'danger'
+      : phase === 'cancelled'
+        ? 'warn'
+        : isLost
+          ? 'warn'
+          : isRunning
+            ? 'accent'
+            : 'neutral';
+
+  const statusLabel = {
+    probing: 'Checking for an active mission…',
+    idle: 'Idle',
+    docked: 'Docked',
+    failed: 'Failed',
+    stalled: 'Feedback lost',
+    cancelled: 'Cancelled',
+  }[phase] ?? (rawState ? STATE_LABELS[rawState] ?? rawState : 'Running');
 
   return (
-    <div className="p-6">
-      <h1 className="text-2xl font-bold text-gray-800 dark:text-white">Mission Control</h1>
-      <p className="text-gray-600 dark:text-gray-400 mt-1">
-        Trigger autonomous docking and monitor real-time progress.
-      </p>
-
-      <div className="grid grid-cols-12 gap-6 mt-6">
-        {/* Controls */}
-        <div className="col-span-12 lg:col-span-4 flex flex-col gap-4">
-          {/* Dock ID selector */}
-          <div className="bg-white dark:bg-gray-800 p-4 rounded-xl border border-gray-100 dark:border-gray-700 shadow-sm">
-            <label className="text-xs font-medium text-gray-400 uppercase tracking-wider block mb-2">
-              Dock ID
+    <div className="mx-auto grid max-w-6xl grid-cols-1 gap-3 lg:grid-cols-[300px_1fr]">
+      <div className="flex flex-col gap-3">
+        <Panel title="Mission">
+          <div className="flex flex-col gap-3">
+            <label className="flex flex-col gap-1.5">
+              <span className="field-label">Target dock</span>
+              <select
+                value={dockId}
+                onChange={(event) => setDockId(event.target.value)}
+                disabled={isRunning || isUndocking || DOCK_IDS.length === 1}
+                className="h-9 rounded-[5px] border border-edge-strong bg-surface px-2 text-[13px] text-ink disabled:opacity-60"
+              >
+                {DOCK_IDS.map((id) => (
+                  <option key={id} value={id}>{id}</option>
+                ))}
+              </select>
+              {DOCK_IDS.length === 1 && (
+                <span className="text-[11px] text-faint">One dock is defined in dock.yaml.</span>
+              )}
             </label>
-            <select
-              value={dockId}
-              onChange={e => setDockId(e.target.value)}
-              disabled={isDocking}
-              className="w-full rounded-lg border border-gray-200 dark:border-gray-600 bg-gray-50 dark:bg-gray-900 text-gray-800 dark:text-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
-            >
-              {DOCK_IDS.map(id => (
-                <option key={id} value={id}>{id}</option>
-              ))}
-            </select>
-          </div>
 
-          {/* Action buttons */}
-          <div className="bg-white dark:bg-gray-800 p-5 rounded-xl border border-gray-100 dark:border-gray-700 shadow-sm flex flex-col gap-3">
-            {!isDocking && !isDocked && (
-              <button
+            {isRunning ? (
+              <Button variant="danger" size="lg" block onClick={handleCancel}>
+                <StopIcon size={17} /> Cancel mission
+              </Button>
+            ) : isDocked ? (
+              <Button size="lg" block onClick={handleUndock} disabled={isUndocking}>
+                {isUndocking ? 'Backing out…' : 'Undock'}
+              </Button>
+            ) : (
+              <Button
+                variant="primary"
+                size="lg"
+                block
                 onClick={handleStart}
-                className="w-full py-3 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold transition-colors"
+                disabled={!isConnected || phase === 'probing'}
               >
-                🚀 Initiate Docking
-              </button>
+                <PlayIcon size={17} /> Start docking
+              </Button>
             )}
-            {isDocking && (
-              <button
-                onClick={handleCancel}
-                className="w-full py-3 rounded-lg bg-red-600 hover:bg-red-700 text-white font-semibold transition-colors"
-              >
-                ✕ Cancel Mission
-              </button>
+
+            {!isConnected && (
+              <Badge tone="warn" className="justify-center py-1.5">No link to the robot</Badge>
             )}
-            {isDocked && !isDocking && (
-              <button
-                onClick={handleUndock}
-                className="w-full py-3 rounded-lg bg-gray-600 hover:bg-gray-700 text-white font-semibold transition-colors"
-              >
-                ↩ Undock
-              </button>
-            )}
-            {!isDocking && !isDocked && failed && (
-              <p className="text-xs text-center text-red-500">Mission failed. Ready to retry.</p>
+            {adopted && isRunning && (
+              <Badge tone="warn" className="justify-center py-1.5">
+                Mission started elsewhere
+              </Badge>
             )}
           </div>
+        </Panel>
 
-          {/* Status */}
-          {currentState && (
-            <div className="bg-white dark:bg-gray-800 p-4 rounded-xl border border-gray-100 dark:border-gray-700 shadow-sm">
-              <p className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2">Status</p>
-              <p className={`text-sm font-semibold ${
-                isDocked ? 'text-green-600 dark:text-green-400' :
-                failed   ? 'text-red-500' :
-                           'text-blue-600 dark:text-blue-400'
-              }`}>
-                {STATE_LABELS[currentState] ?? currentState}
+        <Panel title="Status">
+          <div className="flex flex-col gap-3">
+            <StatusLine
+              tone={statusTone}
+              label={statusLabel}
+              pulse={(isRunning && !isLost) || phase === 'probing'}
+            />
+            {isRunning && rawState && (
+              <p className="text-xs leading-relaxed text-faint">{STATE_HINTS[rawState]}</p>
+            )}
+            {phase === 'stalled' && (
+              <p className="text-xs leading-relaxed text-faint">
+                The coordinator stopped publishing feedback without reporting an
+                outcome. The robot may still be moving — cancel if unsure.
               </p>
-              {showGauge && <DistanceGauge distanceM={distanceM} />}
+            )}
+            {isLost && (
+              <Badge tone="warn"><WarningIcon size={12} /> Recovering</Badge>
+            )}
+            {showRange && (
+              <div className="flex flex-col gap-1.5 border-t border-edge pt-3">
+                <Readout label="Range to dock" value={distanceM.toFixed(2)} unit="m" />
+                <Meter
+                  fraction={1 - Math.min(distanceM, TRACKING_RANGE_M) / TRACKING_RANGE_M}
+                  tone={isLost ? 'warn' : 'accent'}
+                />
+              </div>
+            )}
+            {phase === 'stalled' && (
+              <Button variant="danger" size="sm" block onClick={handleCancel}>
+                <StopIcon size={14} /> Cancel anyway
+              </Button>
+            )}
+          </div>
+        </Panel>
+      </div>
+
+      <div className="flex flex-col gap-3">
+        <Panel title="Pipeline">
+          {pipelineState ? (
+            <Pipeline
+              activeState={pipelineState}
+              completed={completed}
+              failed={failed}
+              lost={isLost}
+            />
+          ) : (
+            <p className="text-xs text-faint">
+              The mission runs staging, search, tracking, and approach in order.
+              Start a mission to follow it.
+            </p>
+          )}
+        </Panel>
+
+        <Panel title="Mission log" flush className="min-h-[340px]">
+          {logs.length === 0 ? (
+            <EmptyState
+              icon={<DockIcon size={22} />}
+              title={phase === 'probing' ? 'Checking for an active mission…' : 'No mission running'}
+              hint="Feedback from the docking coordinator appears here, one line per state change."
+            />
+          ) : (
+            <div ref={logRef} className="h-[340px] overflow-y-auto px-3 py-2">
+              {logs.map((entry) => (
+                <div key={entry.id} className="flex gap-2.5 py-[3px] text-[11.5px] leading-relaxed">
+                  <span className="tnum shrink-0 text-faint">{entry.time}</span>
+                  <span className={LOG_TONES[entry.level]}>{entry.text}</span>
+                </div>
+              ))}
             </div>
           )}
-        </div>
-
-        {/* Visual pipeline + log */}
-        <div className="col-span-12 lg:col-span-8 flex flex-col gap-4">
-          {/* Pipeline */}
-          <div className="bg-white dark:bg-gray-800 p-5 rounded-xl border border-gray-100 dark:border-gray-700 shadow-sm">
-            <p className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-3">Mission Pipeline</p>
-            {currentState ? (
-              <StatePipeline
-                currentState={currentState}
-                completedStates={completedStates}
-                failed={failed}
-              />
-            ) : (
-              <p className="text-sm text-gray-400 dark:text-gray-500">
-                Start a mission to see the state pipeline.
-              </p>
-            )}
-          </div>
-
-          {/* Log */}
-          <div className="bg-white dark:bg-gray-800 p-5 rounded-xl border border-gray-100 dark:border-gray-700 shadow-sm flex flex-col flex-1 h-[320px]">
-            <p className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-3">
-              Mission Log
-            </p>
-            <div className="flex-1 overflow-y-auto bg-gray-50 dark:bg-gray-900 p-3 rounded-lg font-mono text-xs">
-              {logs.length === 0 ? (
-                <p className="text-gray-400">No active mission. Click "Initiate Docking" to start.</p>
-              ) : (
-                logs.map(entry => (
-                  <div key={entry.id} className="mb-1 flex gap-2">
-                    <span className="text-gray-400 shrink-0">[{entry.ts}]</span>
-                    <span className={LOG_COLORS[entry.level]}>{entry.text}</span>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-        </div>
+        </Panel>
       </div>
     </div>
   );

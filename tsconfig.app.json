@@ -15,6 +15,12 @@
     "noEmit": true,
     "jsx": "react-jsx",
 
+    /* The ROS-facing layer (services, pages, MapRenderer) is plain JS/JSX.
+       allowJs lets `tsc -b` resolve those imports instead of failing TS7016;
+       checkJs stays off so they are not type-checked as if they were TS. */
+    "allowJs": true,
+    "checkJs": false,
+
     /* Linting */
     "strict": true,
     "noUnusedLocals": true,

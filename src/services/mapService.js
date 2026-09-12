@@ -1,34 +1,37 @@
-import * as ROSLIB from 'roslib';
-import ros from './rosConnection.js';
+import { sharedTopic } from './rosConnection.js';
 
-// This service handles receiving the map data.
-// It subscribes to the '/map' topic.
+// The occupancy grid.
+//
+// This topic is the app's single largest bandwidth cost — a full grid is
+// hundreds of kilobytes and it is published rarely (map_server latches one
+// message; SLAM republishes only as the map grows). The earlier approach of
+// unsubscribing after the first message to save that bandwidth had a real
+// failure mode: navigating away and back left the page with no map at all,
+// because there was no new message to receive and nothing had kept the old one.
+//
+// Caching resolves both concerns at once. The grid is fetched once, held in
+// memory, and replayed instantly to whoever mounts next; the ROS subscription
+// closes as soon as the first grid arrives. Switching views is now free in both
+// bandwidth and latency, and `refreshMap()` exists for the case where the map
+// genuinely has changed.
 
-const mapListener = new ROSLIB.Topic({
-  ros: ros,
+const mapTopic = sharedTopic({
   name: '/map',
-  messageType: 'nav_msgs/msg/OccupancyGrid'
+  messageType: 'nav_msgs/msg/OccupancyGrid',
+  cache: true,
+  oneShot: true,
 });
 
 /**
- * Subscribes to map updates.
- * @param {function} callback - Function called with the map message object.
- * @param {boolean} unsubscribeImmediately - If true, unsubscribes after first message to save bandwidth.
+ * Subscribes to the occupancy grid. Delivers the cached grid immediately if one
+ * has already been received.
+ * @param {function} callback Called with the OccupancyGrid message.
+ * @returns {function} Unsubscribe.
  */
-export const getMapData = (callback, unsubscribeImmediately = true) => {
-  mapListener.subscribe((message) => {
-    callback(message);
-    
-    if (unsubscribeImmediately) {
-      console.log('Unsubscribing from map to save bandwidth.');
-      mapListener.unsubscribe();
-    }
-  });
-};
+export const subscribeToMap = (callback) => mapTopic.subscribe(callback);
 
-/**
- * Unsubscribes from map updates.
- */
-export const unsubscribeFromMap = () => {
-  mapListener.unsubscribe();
-};
+/** Discards the cached grid and pulls a fresh one from the robot. */
+export const refreshMap = () => mapTopic.refresh();
+
+/** The cached grid, or null if none has been received yet. */
+export const getCachedMap = () => mapTopic.getCached();

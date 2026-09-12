@@ -1,18 +1,11 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import svgr from "vite-plugin-svgr";
 
-// https://vite.dev/config/
 export default defineConfig({
-  plugins: [
-    react(),
-    svgr({
-      svgrOptions: {
-        icon: true,
-        // This will transform your SVG to a React component
-        exportType: "named",
-        namedExport: "ReactComponent",
-      },
-    }),
-  ],
+  plugins: [react()],
+  server: {
+    // Bind on all interfaces so the dashboard can be opened from a phone or a
+    // laptop on the same network as the robot, not just from this machine.
+    host: true,
+  },
 });

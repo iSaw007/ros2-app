@@ -1,204 +1,126 @@
-# TailAdmin React - Free React Tailwind Admin Dashboard Template
+# Yahboom Control
 
-TailAdmin is a free and open-source admin dashboard template built on **React and Tailwind CSS**, providing developers
-with everything they need to create a comprehensive, data-driven back-end,
-dashboard, or admin panel solution for upcoming web projects.
+A web control station for a ROS 2 robot: manual driving, map-based navigation,
+and an autonomous marker-guided docking mission, all from a browser on the same
+network as the robot.
 
-With TailAdmin, you get access to all the necessary dashboard UI components, elements, and pages required to build a
-feature-rich and complete dashboard or admin panel. Whether you're building dashboard or admin panel for a complex web
-application or a simple website, TailAdmin is the perfect solution to help you get up and running quickly.
+It is the operator-facing half of a two-part project. The robot side — drivers,
+localisation, Nav2 configuration, the ArUco detector and the docking state
+machine — lives in the companion repository
+[`yahboom-ros2`](https://github.com/iSaw007/yahboom-ros2).
 
-![TailAdmin React.js Dashboard Preview](./banner.png)
+The hardware is a Yahboom MicroROS-Car-Pi5: a Raspberry Pi 5 running ROS 2
+Humble, an ESP32-S3 co-processor driving four encoder motors and the LiDAR, and
+a camera on a pan-tilt mount.
 
-## Overview
+## What it does
 
-TailAdmin provides essential UI components and layouts for building feature-rich, data-driven admin dashboards and
-control panels. It's built on:
+| Page | Purpose |
+| --- | --- |
+| **Overview** | Bridge health, link uptime, and the robot's estimated pose. |
+| **Teleop** | Live camera feed, virtual joystick and keyboard driving, latching emergency stop. |
+| **Navigation** | Pan-and-zoom occupancy grid; double-click to send a Nav2 goal and watch it progress. |
+| **Docking** | Starts the docking mission and tracks its state machine, range to dock, and log. |
 
-- React 19
-- TypeScript
-- Tailwind CSS v4
+The camera is also available from every page as a small dock in the corner,
+toggled from the header. It requests a reduced stream sized to how it is
+actually displayed, and hides itself on the teleop page, where the feed already
+has the screen to itself.
 
-### Quick Links
+## Running it
 
-- [✨ Visit Website](https://tailadmin.com)
-- [📄 Documentation](https://tailadmin.com/docs)
-- [⬇️ Download](https://tailadmin.com/download)
-- [🖌️ Figma Design File (Community Edition)](https://www.figma.com/community/file/1214477970819985778)
-- [⚡ Get PRO Version](https://tailadmin.com/pricing)
-
-### Demos
-
-- [Free Version](https://free-react-demo.tailadmin.com/)
-- [Pro Version](https://react-demo.tailadmin.com)
-
-### Other Versions
-
-- [HTML Version](https://github.com/TailAdmin/tailadmin-free-tailwind-dashboard-template)
-- [Next.js Version](https://github.com/TailAdmin/free-nextjs-admin-dashboard)
-- [Vue.js Version](https://github.com/TailAdmin/vue-tailwind-admin-dashboard)
-- [Angular Version](https://github.com/TailAdmin/free-angular-tailwind-dashboard)
-- [Laravel Version](https://github.com/TailAdmin/tailadmin-laravel)
-
-## Installation
-
-### Prerequisites
-
-To get started with TailAdmin, ensure you have the following prerequisites installed and set up:
-
-- Node.js 18.x or later (recommended to use Node.js 20.x or later)
-
-### Cloning the Repository
-
-Clone the repository using the following command:
+Requires Node.js 20 or later.
 
 ```bash
-git clone https://github.com/TailAdmin/free-react-tailwind-admin-dashboard.git
+npm install
+npm run dev
 ```
 
-> Windows Users: place the repository near the root of your drive if you face issues while cloning.
+The robot's address is read from `VITE_ROS_BRIDGE_IP`. Create a `.env` file:
 
-1. Install dependencies:
+```
+VITE_ROS_BRIDGE_IP=192.168.1.42
+```
 
-   ```bash
-   npm install
-   # or
-   yarn install
-   ```
+Two services must be running on the robot at that address — both are started by
+`unified_bringup.launch.py` in the robot repository:
 
-2. Start the development server:
-   ```bash
-   npm run dev
-   # or
-   yarn dev
-   ```
+- **rosbridge** on port `9090`, which carries every topic and action.
+- **web_video_server** on port `8080`, which serves the camera feed.
 
-## Components
+The dev server binds to all interfaces, so the dashboard can also be opened from
+a phone or tablet on the same network.
 
-TailAdmin is a pre-designed starting point for building a web-based dashboard using React.js and Tailwind CSS. The
-template includes:
+```bash
+npm run build    # type-check and produce a production build in dist/
+npm run lint
+```
 
-- Sophisticated and accessible sidebar
-- Data visualization components
-- Prebuilt profile management and 404 page
-- Tables and Charts(Line and Bar)
-- Authentication forms and input elements
-- Alerts, Dropdowns, Modals, Buttons and more
-- FAQ & Accordion, Testimonials, and Carousels
-- Can't forget Dark Mode 🕶️
+## How it is put together
 
-All components are built with React and styled using Tailwind CSS for easy customization.
+React 19 and Vite, with Tailwind CSS v4 for styling and
+[roslibjs](https://github.com/RobotWebTools/roslibjs) for the ROS connection.
+The starting point was the [TailAdmin](https://tailadmin.com) dashboard
+template; none of its pages or components remain.
 
-## Feature Comparison
+```
+src/
+  services/     the entire ROS-facing layer — one module per capability
+  components/   MapRenderer (canvas occupancy grid) and the UI primitives
+  pages/        one per mode
+  context/      theme, sidebar, and ROS connection status
+  layout/       application shell
+```
 
-### Free Version
+Everything that talks to ROS goes through `services/`, and every subscription is
+created by `sharedTopic()` in `services/rosConnection.js`. That indirection
+earns its place: roslibjs tears a subscription down globally when
+`Topic.unsubscribe()` is called without a callback, so two components sharing a
+topic will otherwise disconnect each other. `sharedTopic()` reference-counts
+subscribers and keeps the ROS-level subscription alive for exactly as long as
+something needs it.
 
-- 1 Unique Dashboard
-- 35+ dashboard components
-- 50+ UI elements
-- Basic Figma design files
-- Community support
+The occupancy grid is cached rather than re-fetched. It is by far the largest
+message the app receives and it is published rarely, so it is read once, held,
+and replayed instantly to any component that mounts later — switching pages
+costs neither bandwidth nor a wait.
 
-### Pro Version
+Both ROS 2 actions (`/navigate_to_pose` and `/dock`) retain the goal id returned
+by `sendGoal`, because roslibjs's `Action` has no `cancel()` — cancelling
+requires `cancelGoal(id)`. They also pass a failure callback, without which any
+outcome other than success is swallowed and the interface waits forever on a
+mission that has already ended.
 
-- 7 Unique Dashboards: Analytics, Ecommerce, Marketing, CRM, SaaS, Stocks, Logistics (more coming soon)
-- 500+ dashboard components and UI elements
-- Complete Figma design file
-- Email support
+The docking page does not read the mission's progress from those callbacks,
+though, because they only exist for a goal this browser tab sent: reload the
+page mid-mission and the robot is still driving while the tab has forgotten
+everything. Instead it follows the action's own hidden topics —
+`/dock/_action/feedback` and `/dock/_action/status` — which makes the robot the
+source of truth. A page that has just loaded picks up a mission already running,
+as does a second device opening the dashboard alongside the first. Cancelling
+likewise goes through `/dock/_action/cancel_goal` rather than roslibjs, so it
+works on a mission this tab did not start.
 
-To learn more about pro version features and pricing, visit our [pricing page](https://tailadmin.com/pricing).
+Three things are worth knowing if you extend that.
 
-## Changelog
+roslibjs v2 removed the `ServiceRequest` constructor that v1 exported. Request
+payloads are plain objects now, and `new ROSLIB.ServiceRequest(...)` throws a
+TypeError which, from inside an event handler, vanishes without any visible
+effect.
 
-### Version 2.3.0 - [April 28, 2026]
-- Added **AI Dashboard** with token usage and revenue tracking.
-- Added **Sales Dashboard** with retention and multi-channel analytics.
-- Added **Finance Dashboard** with cashflow and balance management.
-- Introduced **6 New Layout variations** for improved UI flexibility.
-- Integrated **Advanced Data Visualization** with 7+ new chart types.
+Service calls go through `callServiceTyped()` in `rosConnection.js`, which
+exists to impose a timeout. On Humble, rosbridge defaults
+`default_call_service_timeout` to 0.0 and `call_services_in_new_thread` to
+false, so a service that does not answer promptly blocks rosbridge's main thread
+and never returns — no response, no error, for any connected client. **Setting
+`call_services_in_new_thread:=true` and a non-zero
+`default_call_service_timeout` on the robot's rosbridge is worth doing**; until
+then the client-side timer is all that stops a cancel button from silently doing
+nothing.
 
-### Version 2.1.0 - [Dec 30, 2025]
+The camera's topic must not be percent-encoded in the stream URL —
+web_video_server does not decode `%2F` and simply closes the connection.
 
-- Resolved Date Picker positioning and input issues in Charts.
+## Licence
 
-### Version 2.0.2 - [March 25, 2025]
-
-- Upgraded to React 19
-- Included overrides for packages to prevent peer dependency errors.
-- Migrated from react-flatpickr to flatpickr package for React 19 support
-
-### Version 2.0.1 - [February 27, 2025]
-
-#### Update Overview
-
-- Upgraded to Tailwind CSS v4 for better performance and efficiency.
-- Updated class usage to match the latest syntax and features.
-- Replaced deprecated class and optimized styles.
-
-#### Next Steps
-
-- Run npm install or yarn install to update dependencies.
-- Check for any style changes or compatibility issues.
-- Refer to the Tailwind CSS v4 [Migration Guide](https://tailwindcss.com/docs/upgrade-guide) on this release. if needed.
-- This update keeps the project up to date with the latest Tailwind improvements. 🚀
-
-### Version 2.0.0 - [February 2025]
-
-A major update with comprehensive redesign and modern React patterns implementation.
-
-#### Major Improvements
-
-- Complete UI redesign with modern React patterns
-- New features: collapsible sidebar, chat, and calendar
-- Improved performance and accessibility
-- Updated data visualization using ApexCharts
-
-#### Key Features
-
-- Redesigned dashboards (Ecommerce, Analytics, Marketing, CRM)
-- Enhanced navigation with React Router integration
-- Advanced tables with sorting and filtering
-- Calendar with drag-and-drop support
-- New UI components and improved existing ones
-
-#### Breaking Changes
-
-- Updated sidebar component API
-- Migrated charts to ApexCharts
-- Revised authentication system
-
-[Read more](https://tailadmin.com/docs/update-logs/react) on this release.
-
-### Version 1.3.7 - [June 20, 2024]
-
-#### Enhancements
-
-1. Remove Repetition of DefaultLayout in every Pages
-2. Add ClickOutside Component for reduce repeated functionality in Header Message, Notification and User Dropdowns.
-
-### Version 1.3.6 - [Jan 31, 2024]
-
-#### Enhancements
-
-1. Integrate flatpickr in [Date Picker/Form Elements]
-2. Change color after select an option [Select Element/Form Elements].
-3. Make it functional [Multiselect Dropdown/Form Elements].
-4. Make best value editable [Pricing Table One/Pricing Table].
-5. Rearrange Folder structure.
-
-### Version 1.2.0 - [Apr 28, 2023]
-
-- Add Typescript in TailAdmin React.
-
-### Version 1.0.0 - Initial Release - [Mar 13, 2023]
-
-- Initial release of TailAdmin React.
-
-## License
-
-TailAdmin React.js Free Version is released under the MIT License.
-
-## Support
-
-If you find this project helpful, please consider giving it a star on GitHub. Your support helps us continue developing
-and maintaining this template.
+MIT. See [LICENSE.md](LICENSE.md).

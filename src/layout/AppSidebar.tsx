@@ -1,72 +1,80 @@
-import { Link, useLocation } from "react-router";
+import { NavLink } from "react-router";
 import { useSidebar } from "../context/SidebarContext";
-import { BoxCubeIcon, GridIcon, PageIcon, PlugInIcon } from "../icons";
+import { DockIcon, MapIcon, OverviewIcon, TeleopIcon } from "../components/ui/Icons";
 
 type NavItem = {
   name: string;
+  /** One word on what the page is for, shown when the rail is expanded. */
+  hint: string;
   icon: React.ReactNode;
   path: string;
 };
 
 const navItems: NavItem[] = [
-  { icon: <GridIcon />, name: "Overview", path: "/" },
-  { icon: <BoxCubeIcon />, name: "Teleop", path: "/teleop" },
-  { icon: <PageIcon />, name: "Navigation", path: "/navigation" },
-  { icon: <PlugInIcon />, name: "Docking", path: "/docking" },
+  { icon: <OverviewIcon />, name: "Overview", hint: "Status", path: "/" },
+  { icon: <TeleopIcon />, name: "Teleop", hint: "Manual control", path: "/teleop" },
+  { icon: <MapIcon />, name: "Navigation", hint: "Map and waypoints", path: "/navigation" },
+  { icon: <DockIcon />, name: "Docking", hint: "Autonomous mission", path: "/docking" },
 ];
 
 const AppSidebar: React.FC = () => {
-  const { isExpanded, isMobileOpen, isHovered, setIsHovered } = useSidebar();
-  const location = useLocation();
-
-  const isActive = (path: string) => location.pathname === path;
+  const { isExpanded, isMobileOpen, closeMobileSidebar } = useSidebar();
+  const showLabels = isExpanded || isMobileOpen;
 
   return (
     <aside
-      className={`fixed left-0 top-0 z-50 flex h-screen flex-col border-r border-gray-200 bg-white px-5 text-gray-900 transition-all duration-300 ease-in-out dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100 lg:mt-0
-      ${isExpanded || isMobileOpen || isHovered ? "w-[280px]" : "w-[90px]"}
+      className={`fixed left-0 top-0 z-50 flex h-screen flex-col border-r border-edge bg-surface transition-[width,transform] duration-200 ease-out
+      ${showLabels ? "w-[208px]" : "w-[56px]"}
       ${isMobileOpen ? "translate-x-0" : "-translate-x-full"}
       lg:translate-x-0`}
-      onMouseEnter={() => !isExpanded && setIsHovered(true)}
-      onMouseLeave={() => setIsHovered(false)}
     >
-      <div className={`flex py-8 ${!isExpanded && !isHovered ? "lg:justify-center" : "justify-start"}`}>
-        <Link to="/" className="flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-600 text-white shadow-sm">
-            <GridIcon />
-          </div>
-          {(isExpanded || isHovered || isMobileOpen) && (
-            <div>
-              <p className="text-sm font-semibold">Robot App</p>
-              <p className="text-xs text-gray-500 dark:text-gray-400">Control station</p>
-            </div>
+      {/* Identity. The robot's name, not the template's. */}
+      <div
+        className={`flex h-12 shrink-0 items-center border-b border-edge ${
+          showLabels ? "px-3" : "justify-center px-0"
+        }`}
+      >
+        <div className="flex items-center gap-2.5 overflow-hidden">
+          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-[4px] bg-accent text-[11px] font-bold text-accent-fg">
+            Y
+          </span>
+          {showLabels && (
+            <span className="truncate text-[13px] font-semibold tracking-tight">
+              Yahboom Control
+            </span>
           )}
-        </Link>
+        </div>
       </div>
 
-      <nav className="flex-1">
-        <ul className="flex flex-col gap-3">
+      <nav className="flex-1 overflow-y-auto p-2">
+        <ul className="flex flex-col gap-0.5">
           {navItems.map((item) => (
             <li key={item.path}>
-              <Link
+              <NavLink
                 to={item.path}
-                className={`flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition ${
-                  isActive(item.path)
-                  ? "bg-blue-50 text-blue-700 dark:bg-blue-500/15 dark:text-blue-300"
-                    : "text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-white/5"
-                } ${!isExpanded && !isHovered ? "lg:justify-center" : ""}`}
+                end={item.path === "/"}
+                onClick={closeMobileSidebar}
+                title={showLabels ? undefined : item.name}
+                className={({ isActive }) =>
+                  `flex items-center rounded-[5px] text-[13px] font-medium transition-colors ${
+                    showLabels ? "gap-2.5 px-2.5 py-2" : "justify-center py-2.5"
+                  } ${
+                    isActive
+                      ? "bg-accent-soft text-accent"
+                      : "text-muted hover:bg-sunken hover:text-ink"
+                  }`
+                }
               >
-                <span
-                  className={`flex items-center justify-center ${
-                    isActive(item.path)
-                      ? "text-blue-600 dark:text-blue-300"
-                      : "text-gray-500 dark:text-gray-400"
-                  }`}
-                >
-                  {item.icon}
-                </span>
-                {(isExpanded || isHovered || isMobileOpen) && <span>{item.name}</span>}
-              </Link>
+                <span className="shrink-0">{item.icon}</span>
+                {showLabels && (
+                  <span className="flex min-w-0 flex-col leading-tight">
+                    <span className="truncate">{item.name}</span>
+                    <span className="truncate text-[10px] font-normal text-faint">
+                      {item.hint}
+                    </span>
+                  </span>
+                )}
+              </NavLink>
             </li>
           ))}
         </ul>

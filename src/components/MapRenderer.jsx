@@ -1,350 +1,355 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { subscribeToPose, unsubscribeFromPose } from '../services/telemetryService';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { subscribeToPose, getLastPose } from '../services/telemetryService';
+import { IconButton } from './ui/Button';
+import { CrosshairIcon, FitIcon, MinusIcon, PlusIcon } from './ui/Icons';
 
-export default function MapRenderer({ mapData, onMapDoubleClick, targetPose }) {
+// Occupancy-grid canvas.
+//
+// The grid keeps a fixed dark palette in both themes. An operator reads a map
+// by shape and contrast, and a map that inverts when the UI theme changes is
+// harder to trust than one that always looks the same.
+
+const readMapPalette = () => {
+  const style = getComputedStyle(document.documentElement);
+  return {
+    void: style.getPropertyValue('--map-void').trim() || '#0b0e12',
+    free: style.getPropertyValue('--map-free').trim() || '#f2f4f7',
+    occupied: style.getPropertyValue('--map-occupied').trim() || '#1b2430',
+    unknown: style.getPropertyValue('--map-unknown').trim() || '#949eab',
+  };
+};
+
+const ZOOM_MIN = 0.2;
+const ZOOM_MAX = 60;
+
+export default function MapRenderer({ mapData, onWaypoint, targetPose }) {
   const containerRef = useRef(null);
   const canvasRef = useRef(null);
-  const offscreenCanvasRef = useRef(null);
-  
-  // Transform state (zoom and pan)
-  const [zoom, setZoom] = useState(1);
-  const [pan, setPan] = useState({ x: 0, y: 0 });
-  const [dragging, setDragging] = useState(false);
-  const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
-  
-  // Robot pose state
-  const [robotPose, setRobotPose] = useState(null);
+  const gridCanvasRef = useRef(null);
+  const fittedFor = useRef(null);
 
-  // Subscribe to live robot pose
-  useEffect(() => {
-    subscribeToPose((x, y, yaw) => {
-      setRobotPose({ x, y, yaw });
+  const [view, setView] = useState({ zoom: 1, x: 0, y: 0 });
+  const [isDragging, setIsDragging] = useState(false);
+  const dragOrigin = useRef({ x: 0, y: 0 });
+  const [robotPose, setRobotPose] = useState(getLastPose);
+  const [cursorWorld, setCursorWorld] = useState(null);
+  const [size, setSize] = useState({ width: 0, height: 0 });
+
+  useEffect(() => subscribeToPose(setRobotPose), []);
+
+  // Track the container's real size so the canvas stays sharp when the window,
+  // the sidebar, or the panel around it changes.
+  useLayoutEffect(() => {
+    const element = containerRef.current;
+    if (!element) return undefined;
+    const observer = new ResizeObserver(([entry]) => {
+      const { width, height } = entry.contentRect;
+      setSize({ width, height });
     });
-    return () => {
-      unsubscribeFromPose();
-    };
+    observer.observe(element);
+    return () => observer.disconnect();
   }, []);
 
-  // Update offscreen canvas when map data changes
-  useEffect(() => {
-    if (!mapData || !mapData.info) return;
-
+  /** Fits the whole grid into the viewport with a small margin. */
+  const fitToView = useCallback(() => {
+    if (!mapData?.info || !size.width || !size.height) return;
     const { width, height } = mapData.info;
-    const data = mapData.data;
+    const zoom = Math.min(size.width / width, size.height / height) * 0.92;
+    setView({
+      zoom,
+      x: (size.width - width * zoom) / 2,
+      y: (size.height - height * zoom) / 2,
+    });
+  }, [mapData, size]);
 
-    // Create or resize offscreen canvas
-    let offscreenCanvas = offscreenCanvasRef.current;
-    if (!offscreenCanvas) {
-      offscreenCanvas = document.createElement('canvas');
-      offscreenCanvasRef.current = offscreenCanvas;
+  // Rasterise the grid once per message into an offscreen canvas, so panning and
+  // zooming only ever redraw a bitmap rather than re-walking hundreds of
+  // thousands of cells.
+  useEffect(() => {
+    if (!mapData?.info) return;
+    const { width, height } = mapData.info;
+    const cells = mapData.data;
+    const palette = readMapPalette();
+
+    const parse = (hex) => [
+      parseInt(hex.slice(1, 3), 16),
+      parseInt(hex.slice(3, 5), 16),
+      parseInt(hex.slice(5, 7), 16),
+    ];
+    const free = parse(palette.free);
+    const occupied = parse(palette.occupied);
+    const unknown = parse(palette.unknown);
+
+    let offscreen = gridCanvasRef.current;
+    if (!offscreen) {
+      offscreen = document.createElement('canvas');
+      gridCanvasRef.current = offscreen;
     }
-    offscreenCanvas.width = width;
-    offscreenCanvas.height = height;
+    offscreen.width = width;
+    offscreen.height = height;
 
-    const ctx = offscreenCanvas.getContext('2d');
-    const imageData = ctx.createImageData(width, height);
+    const context = offscreen.getContext('2d');
+    const image = context.createImageData(width, height);
 
-    // Render OccupancyGrid cells
-    for (let i = 0; i < data.length; i++) {
-      const val = data[i];
-      let r, g, b, a;
+    for (let i = 0; i < cells.length; i += 1) {
+      const value = cells[i];
+      const colour = value === 0 ? free : value === 100 ? occupied : unknown;
 
-      if (val === 0) {
-        // Free space: light grey-white
-        r = 245; g = 247; b = 250; a = 255;
-      } else if (val === 100) {
-        // Occupied: dark slate grey
-        r = 30; g = 41; b = 59; a = 255;
-      } else {
-        // Unknown or intermediate: soft blue-grey
-        r = 148; g = 163; b = 184; a = 255;
-      }
-
-      // ROS 2 OccupancyGrid: row-major, starting at bottom-left corner
-      // HTML Canvas ImageData: row-major, starting at top-left corner
-      // Vertically flip the index
+      // An OccupancyGrid is row-major from the bottom-left; ImageData is
+      // row-major from the top-left, so the row index is mirrored.
       const x = i % width;
       const y = height - 1 - Math.floor(i / width);
-      const canvasIndex = (y * width + x) * 4;
+      const offset = (y * width + x) * 4;
 
-      imageData.data[canvasIndex] = r;
-      imageData.data[canvasIndex + 1] = g;
-      imageData.data[canvasIndex + 2] = b;
-      imageData.data[canvasIndex + 3] = a;
+      image.data[offset] = colour[0];
+      image.data[offset + 1] = colour[1];
+      image.data[offset + 2] = colour[2];
+      image.data[offset + 3] = value === -1 ? 90 : 255;
     }
 
-    ctx.putImageData(imageData, 0, 0);
-
-    // Initial fit-to-view
-    if (containerRef.current) {
-      const containerWidth = containerRef.current.clientWidth;
-      const containerHeight = containerRef.current.clientHeight;
-      const scaleX = containerWidth / width;
-      const scaleY = containerHeight / height;
-      const initialZoom = Math.min(scaleX, scaleY) * 0.9;
-      setZoom(initialZoom);
-      setPan({
-        x: (containerWidth - width * initialZoom) / 2,
-        y: (containerHeight - height * initialZoom) / 2
-      });
-    }
+    context.putImageData(image, 0, 0);
+    fittedFor.current = null; // a new grid needs a fresh fit
   }, [mapData]);
 
-  // Main draw loop (requestAnimationFrame style drawing)
+  // Fit once per grid, and only once the container has been measured. Keeping
+  // this out of the rasterise effect matters: fitToView changes identity on
+  // every resize, and folding it in there would re-fit — throwing away the
+  // operator's pan and zoom — each time the window or sidebar moved.
+  useEffect(() => {
+    if (!mapData?.info || !size.width || !size.height) return;
+    if (fittedFor.current === mapData) return;
+    fittedFor.current = mapData;
+    fitToView();
+  }, [mapData, size, fitToView]);
+
+  // Draw.
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (!canvas || !size.width || !size.height) return;
 
-    const ctx = canvas.getContext('2d');
-    const offscreenCanvas = offscreenCanvasRef.current;
+    const ratio = window.devicePixelRatio || 1;
+    canvas.width = size.width * ratio;
+    canvas.height = size.height * ratio;
+    canvas.style.width = `${size.width}px`;
+    canvas.style.height = `${size.height}px`;
 
-    // Set canvas resolution matching display size
-    const container = containerRef.current;
-    if (container) {
-      canvas.width = container.clientWidth;
-      canvas.height = container.clientHeight;
+    const context = canvas.getContext('2d');
+    const palette = readMapPalette();
+
+    context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    context.fillStyle = palette.void;
+    context.fillRect(0, 0, size.width, size.height);
+
+    context.save();
+    context.translate(view.x, view.y);
+    context.scale(view.zoom, view.zoom);
+
+    if (gridCanvasRef.current) {
+      // Nearest-neighbour: at high zoom an operator should see honest cells,
+      // not a blurred interpolation of them.
+      context.imageSmoothingEnabled = view.zoom < 1;
+      context.drawImage(gridCanvasRef.current, 0, 0);
     }
 
-    // Clear display canvas
-    ctx.fillStyle = '#0f172a'; // Deep dark background
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    // Overlays are drawn at a constant screen size, so they stay legible at
+    // every zoom level instead of growing with the map.
+    const toPixels = (worldX, worldY) => {
+      const { resolution, origin, height } = mapData.info;
+      return [
+        (worldX - origin.position.x) / resolution,
+        height - 1 - (worldY - origin.position.y) / resolution,
+      ];
+    };
 
-    ctx.save();
-    
-    // Apply pan & zoom
-    ctx.translate(pan.x, pan.y);
-    ctx.scale(zoom, zoom);
-
-    // 1. Draw cached map image
-    if (offscreenCanvas) {
-      ctx.drawImage(offscreenCanvas, 0, 0);
+    if (mapData?.info && targetPose) {
+      const [px, py] = toPixels(targetPose.x, targetPose.y);
+      const r = 7 / view.zoom;
+      context.strokeStyle = '#f26060';
+      context.lineWidth = 1.5 / view.zoom;
+      context.beginPath();
+      context.arc(px, py, r, 0, Math.PI * 2);
+      context.stroke();
+      context.beginPath();
+      context.moveTo(px - r * 1.7, py);
+      context.lineTo(px + r * 1.7, py);
+      context.moveTo(px, py - r * 1.7);
+      context.lineTo(px, py + r * 1.7);
+      context.stroke();
     }
 
-    // 2. Overlay live robot pose
-    if (robotPose && mapData && mapData.info) {
-      const { resolution, origin } = mapData.info;
-      const height = mapData.info.height;
+    if (mapData?.info && robotPose) {
+      const [px, py] = toPixels(robotPose.x, robotPose.y);
+      const scale = 1 / view.zoom;
 
-      // Translate world coordinates to pixel coordinates on the map
-      const robotPx = (robotPose.x - origin.position.x) / resolution;
-      const robotPy = height - 1 - ((robotPose.y - origin.position.y) / resolution);
+      context.save();
+      context.translate(px, py);
+      // Yaw is counter-clockwise in the world; canvas y points down.
+      context.rotate(-robotPose.yaw);
 
-      // Draw robot position indicator (glowing outer circle + arrow direction)
-      ctx.save();
-      ctx.translate(robotPx, robotPy);
-      ctx.rotate(-robotPose.yaw); // Rotate based on robot yaw (negative because canvas Y is flipped)
+      context.fillStyle = 'rgba(59,130,246,0.22)';
+      context.beginPath();
+      context.arc(0, 0, 11 * scale, 0, Math.PI * 2);
+      context.fill();
 
-      // Outer glow pulse
-      ctx.beginPath();
-      ctx.arc(0, 0, 8, 0, 2 * Math.PI);
-      ctx.fillStyle = 'rgba(59, 130, 246, 0.4)'; // Glow blue
-      ctx.fill();
+      // A wedge pointing along the robot's heading reads as an orientation at a
+      // glance, where a dot plus a line does not.
+      context.fillStyle = '#3b82f6';
+      context.beginPath();
+      context.moveTo(10 * scale, 0);
+      context.lineTo(-6 * scale, -6 * scale);
+      context.lineTo(-3 * scale, 0);
+      context.lineTo(-6 * scale, 6 * scale);
+      context.closePath();
+      context.fill();
 
-      // Inner dot
-      ctx.beginPath();
-      ctx.arc(0, 0, 4, 0, 2 * Math.PI);
-      ctx.fillStyle = '#3b82f6'; // Bright blue
-      ctx.fill();
-
-      // Heading arrow/nose pointing forward (+X in robot frame is forward)
-      ctx.beginPath();
-      ctx.moveTo(3, 0);
-      ctx.lineTo(8, -4);
-      ctx.lineTo(8, 4);
-      ctx.closePath();
-      ctx.fillStyle = '#60a5fa'; // Light blue arrow
-      ctx.fill();
-
-      ctx.restore();
+      context.restore();
     }
 
-    // 3. Overlay target waypoint
-    if (targetPose && mapData && mapData.info) {
-      const { resolution, origin } = mapData.info;
-      const height = mapData.info.height;
+    context.restore();
+  }, [view, size, robotPose, mapData, targetPose]);
 
-      const targetPx = (targetPose.x - origin.position.x) / resolution;
-      const targetPy = height - 1 - ((targetPose.y - origin.position.y) / resolution);
-
-      ctx.save();
-      ctx.translate(targetPx, targetPy);
-
-      // Draw red crosshair target marker
-      ctx.beginPath();
-      ctx.arc(0, 0, 6, 0, 2 * Math.PI);
-      ctx.strokeStyle = '#ef4444'; // Red
-      ctx.lineWidth = 2;
-      ctx.stroke();
-
-      ctx.beginPath();
-      ctx.moveTo(-10, 0);
-      ctx.lineTo(10, 0);
-      ctx.moveTo(0, -10);
-      ctx.lineTo(0, 10);
-      ctx.strokeStyle = '#ef4444';
-      ctx.lineWidth = 2;
-      ctx.stroke();
-
-      ctx.restore();
-    }
-
-    ctx.restore();
-  }, [pan, zoom, robotPose, mapData, targetPose]);
-
-  // Handle drag-to-pan
-  const handleMouseDown = (e) => {
-    setDragging(true);
-    setDragStart({ x: e.clientX - pan.x, y: e.clientY - pan.y });
-  };
-
-  const handleMouseMove = (e) => {
-    if (!dragging) return;
-    setPan({
-      x: e.clientX - dragStart.x,
-      y: e.clientY - dragStart.y
-    });
-  };
-
-  const handleMouseUp = () => {
-    setDragging(false);
-  };
-
-  const handleDoubleClick = (e) => {
-    if (!mapData || !mapData.info || !onMapDoubleClick) return;
-    
+  const toWorld = useCallback((clientX, clientY) => {
+    if (!mapData?.info || !canvasRef.current) return null;
     const rect = canvasRef.current.getBoundingClientRect();
-    const mouseX = e.clientX - rect.left;
-    const mouseY = e.clientY - rect.top;
-    
-    // Reverse pan and zoom to get canvas pixel coordinates
-    const canvasX = (mouseX - pan.x) / zoom;
-    const canvasY = (mouseY - pan.y) / zoom;
-    
+    const canvasX = (clientX - rect.left - view.x) / view.zoom;
+    const canvasY = (clientY - rect.top - view.y) / view.zoom;
     const { resolution, origin, height } = mapData.info;
-    
-    // Convert back to ROS world coordinates
-    const worldX = (canvasX * resolution) + origin.position.x;
-    const worldY = origin.position.y + ((height - 1 - canvasY) * resolution);
-    
-    onMapDoubleClick(worldX, worldY);
+    return {
+      x: canvasX * resolution + origin.position.x,
+      y: origin.position.y + (height - 1 - canvasY) * resolution,
+    };
+  }, [mapData, view]);
+
+  const handleMouseDown = (event) => {
+    setIsDragging(true);
+    dragOrigin.current = { x: event.clientX - view.x, y: event.clientY - view.y };
   };
 
-  // Handle scroll-wheel-to-zoom
-  const handleWheel = (e) => {
-    e.preventDefault();
-    const zoomFactor = 1.1;
-    const newZoom = e.deltaY < 0 ? zoom * zoomFactor : zoom / zoomFactor;
-    
-    // Cap zoom scale
-    const boundedZoom = Math.max(0.1, Math.min(100, newZoom));
-    
-    // Zoom toward cursor position
-    const rect = canvasRef.current.getBoundingClientRect();
-    const mouseX = e.clientX - rect.left;
-    const mouseY = e.clientY - rect.top;
-    
-    const dx = mouseX - pan.x;
-    const dy = mouseY - pan.y;
-    
-    setZoom(boundedZoom);
-    setPan({
-      x: mouseX - dx * (boundedZoom / zoom),
-      y: mouseY - dy * (boundedZoom / zoom)
+  const handleMouseMove = (event) => {
+    setCursorWorld(toWorld(event.clientX, event.clientY));
+    if (!isDragging) return;
+    setView((current) => ({
+      ...current,
+      x: event.clientX - dragOrigin.current.x,
+      y: event.clientY - dragOrigin.current.y,
+    }));
+  };
+
+  const endDrag = () => setIsDragging(false);
+
+  const handleDoubleClick = (event) => {
+    const world = toWorld(event.clientX, event.clientY);
+    if (world && onWaypoint) onWaypoint(world);
+  };
+
+  const zoomAbout = (factor, clientX, clientY) => {
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const anchorX = clientX === undefined ? size.width / 2 : clientX - rect.left;
+    const anchorY = clientY === undefined ? size.height / 2 : clientY - rect.top;
+
+    setView((current) => {
+      const zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, current.zoom * factor));
+      const ratio = zoom / current.zoom;
+      return {
+        zoom,
+        x: anchorX - (anchorX - current.x) * ratio,
+        y: anchorY - (anchorY - current.y) * ratio,
+      };
     });
   };
 
-  const resetView = () => {
-    if (!mapData || !mapData.info || !containerRef.current) return;
-    const { width, height } = mapData.info;
-    const containerWidth = containerRef.current.clientWidth;
-    const containerHeight = containerRef.current.clientHeight;
-    const scaleX = containerWidth / width;
-    const scaleY = containerHeight / height;
-    const initialZoom = Math.min(scaleX, scaleY) * 0.9;
-    setZoom(initialZoom);
-    setPan({
-      x: (containerWidth - width * initialZoom) / 2,
-      y: (containerHeight - height * initialZoom) / 2
-    });
-  };
+  // Registered natively rather than through React's onWheel, which attaches a
+  // passive listener that cannot call preventDefault — without it the page
+  // scrolls behind the map while zooming.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return undefined;
+    const onWheel = (event) => {
+      event.preventDefault();
+      zoomAbout(event.deltaY < 0 ? 1.12 : 1 / 1.12, event.clientX, event.clientY);
+    };
+    canvas.addEventListener('wheel', onWheel, { passive: false });
+    return () => canvas.removeEventListener('wheel', onWheel);
+  }, [size]);
 
-  const centerOnRobot = () => {
-    if (!robotPose || !mapData || !mapData.info || !containerRef.current) return;
+  const centreOnRobot = () => {
+    if (!robotPose || !mapData?.info) return;
     const { resolution, origin, height } = mapData.info;
-    const containerWidth  = containerRef.current.clientWidth;
-    const containerHeight = containerRef.current.clientHeight;
-    const targetZoom = 4;
-    const robotPx = (robotPose.x - origin.position.x) / resolution;
-    const robotPy = height - 1 - ((robotPose.y - origin.position.y) / resolution);
-    setZoom(targetZoom);
-    setPan({
-      x: containerWidth  / 2 - robotPx * targetZoom,
-      y: containerHeight / 2 - robotPy * targetZoom,
-    });
+    const zoom = Math.max(view.zoom, 4);
+    const px = (robotPose.x - origin.position.x) / resolution;
+    const py = height - 1 - (robotPose.y - origin.position.y) / resolution;
+    setView({ zoom, x: size.width / 2 - px * zoom, y: size.height / 2 - py * zoom });
   };
+
+  // Metres per 100 screen pixels, rounded to something a person would say.
+  const scaleMetres = mapData?.info
+    ? (100 / view.zoom) * mapData.info.resolution
+    : null;
 
   return (
-    <div className="relative w-full h-[550px] bg-slate-950 rounded-xl overflow-hidden shadow-lg border border-slate-800" ref={containerRef}>
+    <div
+      ref={containerRef}
+      className="relative h-full w-full overflow-hidden bg-[var(--map-void)]"
+    >
       <canvas
         ref={canvasRef}
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
-        onMouseLeave={handleMouseUp}
-        onWheel={handleWheel}
+        onMouseUp={endDrag}
+        onMouseLeave={() => { endDrag(); setCursorWorld(null); }}
         onDoubleClick={handleDoubleClick}
-        className="w-full h-full cursor-grab active:cursor-grabbing"
+        className={isDragging ? 'cursor-grabbing' : 'cursor-grab'}
       />
-      
-      {/* Floating control widget */}
-      <div className="absolute bottom-4 right-4 flex flex-col gap-2">
-        <button
-          onClick={() => {
-            const newZoom = zoom * 1.2;
-            setZoom(Math.min(100, newZoom));
-          }}
-          className="w-10 h-10 flex items-center justify-center bg-slate-800 hover:bg-slate-700 text-white rounded-lg border border-slate-700 shadow-md font-bold transition-all cursor-pointer"
-          title="Zoom In"
+
+      {/* View controls */}
+      <div className="absolute bottom-3 right-3 flex flex-col gap-1.5">
+        <IconButton label="Zoom in" onClick={() => zoomAbout(1.25)}>
+          <PlusIcon size={15} />
+        </IconButton>
+        <IconButton label="Zoom out" onClick={() => zoomAbout(1 / 1.25)}>
+          <MinusIcon size={15} />
+        </IconButton>
+        <IconButton label="Fit map to view" onClick={fitToView}>
+          <FitIcon size={15} />
+        </IconButton>
+        <IconButton
+          label="Centre on robot"
+          variant={robotPose ? 'primary' : 'default'}
+          onClick={centreOnRobot}
+          disabled={!robotPose}
         >
-          ＋
-        </button>
-        <button
-          onClick={() => {
-            const newZoom = zoom / 1.2;
-            setZoom(Math.max(0.1, newZoom));
-          }}
-          className="w-10 h-10 flex items-center justify-center bg-slate-800 hover:bg-slate-700 text-white rounded-lg border border-slate-700 shadow-md font-bold transition-all cursor-pointer"
-          title="Zoom Out"
-        >
-          －
-        </button>
-        <button
-          onClick={resetView}
-          className="w-10 h-10 flex items-center justify-center bg-slate-800 hover:bg-slate-700 text-white rounded-lg border border-slate-700 shadow-md font-bold transition-all cursor-pointer"
-          title="Reset View"
-        >
-          🔄
-        </button>
-        {robotPose && (
-          <button
-            onClick={centerOnRobot}
-            className="w-10 h-10 flex items-center justify-center bg-blue-700 hover:bg-blue-600 text-white rounded-lg border border-blue-600 shadow-md transition-all cursor-pointer"
-            title="Center on Robot"
-          >
-            🎯
-          </button>
-        )}
+          <CrosshairIcon size={15} />
+        </IconButton>
       </div>
 
-      {/* Telemetry info card */}
+      {/* Pose readout */}
       {robotPose && (
-        <div className="absolute top-4 left-4 bg-slate-900/90 backdrop-blur-sm p-3 rounded-lg border border-slate-800 shadow-md text-xs font-mono text-slate-300 flex flex-col gap-1 pointer-events-none">
-          <div className="text-blue-400 font-bold mb-1 border-b border-slate-800 pb-1">Robot Pose</div>
-          <div>X: {robotPose.x.toFixed(3)} m</div>
-          <div>Y: {robotPose.y.toFixed(3)} m</div>
-          <div>Yaw: {robotPose.yaw.toFixed(3)} rad</div>
+        <div className="pointer-events-none absolute left-3 top-3 rounded-[5px] border border-white/10 bg-black/55 px-2.5 py-2 backdrop-blur-sm">
+          <p className="field-label mb-1 !text-white/45">Robot</p>
+          <p className="tnum text-[11.5px] leading-relaxed text-white/85">
+            {robotPose.x.toFixed(2)}, {robotPose.y.toFixed(2)} m<br />
+            {robotPose.yaw.toFixed(2)} rad
+          </p>
         </div>
       )}
+
+      {/* Scale bar and cursor position */}
+      <div className="pointer-events-none absolute bottom-3 left-3 flex flex-col gap-1.5">
+        {scaleMetres !== null && (
+          <div className="flex items-center gap-2">
+            <div className="h-[5px] w-[100px] border-x border-b border-white/50" />
+            <span className="tnum text-[10.5px] text-white/60">
+              {scaleMetres < 1 ? `${(scaleMetres * 100).toFixed(0)} cm` : `${scaleMetres.toFixed(1)} m`}
+            </span>
+          </div>
+        )}
+        {cursorWorld && (
+          <span className="tnum text-[10.5px] text-white/45">
+            {cursorWorld.x.toFixed(2)}, {cursorWorld.y.toFixed(2)}
+          </span>
+        )}
+      </div>
     </div>
   );
 }

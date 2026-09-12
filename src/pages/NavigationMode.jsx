@@ -1,185 +1,249 @@
-import React, { useState, useEffect } from 'react';
-import { getMapData, unsubscribeFromMap } from '../services/mapService';
-import { sendWaypoint, cancelNavigation, sendBackup } from '../services/navigationService';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { subscribeToMap, refreshMap, getCachedMap } from '../services/mapService';
+import {
+  sendWaypoint,
+  cancelNavigation,
+  sendBackup,
+  cancelBackup,
+} from '../services/navigationService';
+import { useRosStatus } from '../context/RosStatusContext';
 import MapRenderer from '../components/MapRenderer';
+import { Panel } from '../components/ui/Panel';
+import { Button } from '../components/ui/Button';
+import { Badge, EmptyState, Meter, Readout, StatusLine } from '../components/ui/Indicators';
+import { MapIcon, RefreshIcon, StopIcon } from '../components/ui/Icons';
+
+const IDLE = { kind: 'idle', label: 'Idle', tone: 'neutral' };
 
 export default function NavigationMode() {
-  const [mapData, setMapData]     = useState(null);
-  const [mapInfo, setMapInfo]     = useState('Connecting to map…');
-  const [loading, setLoading]     = useState(false);
-  const [targetPose, setTargetPose] = useState(null);
-  const [navStatus, setNavStatus] = useState('Idle');
-  const [isDocked, setIsDocked]   = useState(false);
+  const { isConnected } = useRosStatus();
 
-  // Auto-load map on first mount
-  useEffect(() => { 
-    loadMap(); 
-    return () => unsubscribeFromMap();
+  const [mapData, setMapData] = useState(getCachedMap);
+  const [status, setStatus] = useState(IDLE);
+  const [target, setTarget] = useState(null);
+  const [distanceRemaining, setDistanceRemaining] = useState(null);
+  const [isDocked, setIsDocked] = useState(false);
+
+  // The distance the goal started at, so progress can be shown as a fraction.
+  const initialDistance = useRef(null);
+  const resetTimer = useRef(null);
+
+  // The grid is served from the service's cache, so switching to this view and
+  // back is instant and costs no bandwidth. Nothing is unsubscribed here that
+  // would prevent the map coming back — the cause of the map never reloading
+  // in the previous version.
+  useEffect(() => subscribeToMap(setMapData), []);
+
+  useEffect(() => () => {
+    if (resetTimer.current) clearTimeout(resetTimer.current);
+    cancelNavigation();
+    cancelBackup();
   }, []);
 
-  const loadMap = () => {
-    setLoading(true);
-    setMapInfo('Connecting to map topic…');
-    unsubscribeFromMap(); // Clear any existing subscription first
-    setMapData(null);
-    
-    getMapData((message) => {
-      setMapData(message);
-      const { width, height, resolution } = message.info;
-      setMapInfo(`Map Loaded: ${width}×${height} at ${(resolution * 100).toFixed(0)}cm/px.`);
-      setLoading(false);
-    }, false);
-  };
+  const settleTo = useCallback((next, holdMs = 4000) => {
+    setStatus(next);
+    setDistanceRemaining(null);
+    initialDistance.current = null;
+    if (resetTimer.current) clearTimeout(resetTimer.current);
+    resetTimer.current = setTimeout(() => setStatus(IDLE), holdMs);
+  }, []);
 
-  const executeWaypoint = (x, y, theta = 0) => {
-    sendWaypoint(
-      x, y, theta,
-      (feedback) => {
-        const dist = feedback.distance_remaining?.toFixed(2) ?? '?';
-        setNavStatus(`Navigating… ${dist}m remaining`);
+  const driveTo = useCallback((point) => {
+    setTarget(point);
+    setStatus({ kind: 'navigating', label: 'Navigating', tone: 'accent' });
+
+    sendWaypoint({
+      x: point.x,
+      y: point.y,
+      theta: 0,
+      onFeedback: ({ distanceRemaining: remaining }) => {
+        if (remaining === null) return;
+        if (initialDistance.current === null) initialDistance.current = Math.max(remaining, 0.01);
+        setDistanceRemaining(remaining);
       },
-      (_result) => {
-        setNavStatus('Reached Goal ✓');
-        setTargetPose(null);
-        setTimeout(() => setNavStatus('Idle'), 4000);
-      }
-    );
-  };
+      onResult: ({ success, message }) => {
+        setTarget(null);
+        settleTo(
+          success
+            ? { kind: 'arrived', label: 'Goal reached', tone: 'ok' }
+            : { kind: 'failed', label: message || 'Goal failed', tone: 'danger' },
+        );
+      },
+    });
+  }, [settleTo]);
 
-  const handleMapDoubleClick = (x, y) => {
-    setTargetPose({ x, y, yaw: 0 });
+  const handleWaypoint = useCallback((point) => {
+    if (!isConnected) return;
 
-    if (isDocked) {
-      setNavStatus('Undocking…');
-      sendBackup(0.4, 0.1, null, () => {});
-      
-      // Immediately proceed since action doesn't exist yet
-      setIsDocked(false);
-      setNavStatus('Navigating…');
-      executeWaypoint(x, y);
-    } else {
-      setNavStatus('Navigating…');
-      executeWaypoint(x, y);
+    if (!isDocked) {
+      driveTo(point);
+      return;
     }
-  };
 
-  const handleCancelNav = () => {
+    // Leaving the dock has to finish before Nav2 is given a goal, or the
+    // planner starts from a pose the robot is about to abandon.
+    setStatus({ kind: 'undocking', label: 'Backing out of dock', tone: 'accent' });
+    sendBackup({
+      distance: 0.4,
+      speed: 0.1,
+      onResult: ({ success, message }) => {
+        if (!success) {
+          settleTo({ kind: 'failed', label: message || 'Could not leave the dock', tone: 'danger' });
+          return;
+        }
+        setIsDocked(false);
+        driveTo(point);
+      },
+    });
+  }, [isConnected, isDocked, driveTo, settleTo]);
+
+  const handleCancel = () => {
     cancelNavigation();
-    setNavStatus('Cancelled');
-    setTargetPose(null);
-    setTimeout(() => setNavStatus('Idle'), 3000);
+    cancelBackup();
+    setTarget(null);
+    settleTo({ kind: 'cancelled', label: 'Cancelled', tone: 'warn' }, 3000);
   };
 
-  const isActive = navStatus.startsWith('Navigating') || navStatus === 'Undocking…';
-  const dotColor =
-    isActive          ? 'bg-blue-500 animate-pulse' :
-    navStatus.includes('Goal') ? 'bg-green-500' :
-    navStatus === 'Cancelled'  ? 'bg-red-500'   : 'bg-gray-400';
+  const handleRefreshMap = () => {
+    setMapData(null);
+    refreshMap();
+  };
+
+  const isBusy = status.kind === 'navigating' || status.kind === 'undocking';
+  const progress =
+    distanceRemaining !== null && initialDistance.current
+      ? 1 - Math.min(distanceRemaining / initialDistance.current, 1)
+      : 0;
 
   return (
-    <div className="p-6 max-w-6xl mx-auto">
-      <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-800 dark:text-white">Navigation & Map</h1>
-          <p className="text-gray-600 dark:text-gray-400 mt-1">
-            Stream the occupancy grid and track the robot's real-time position.
-          </p>
-        </div>
-        <button
-          onClick={loadMap}
-          disabled={loading}
-          className="mt-4 md:mt-0 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white font-semibold px-5 py-2.5 rounded-lg shadow-md transition-colors cursor-pointer"
+    <div className="mx-auto grid h-full max-w-[1400px] grid-cols-1 gap-3 lg:grid-cols-[260px_1fr]">
+      {/* Status column */}
+      <div className="flex flex-col gap-3">
+        <Panel
+          title="Map"
+          action={
+            <button
+              onClick={handleRefreshMap}
+              className="flex items-center gap-1 text-[11px] text-faint transition-colors hover:text-ink"
+            >
+              <RefreshIcon size={13} /> Refresh
+            </button>
+          }
         >
-          {loading ? 'Loading…' : mapData ? 'Refresh Map' : 'Load Map'}
-        </button>
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-        {/* Status sidebar */}
-        <div className="lg:col-span-1 bg-white dark:bg-gray-800 p-5 rounded-xl border border-gray-100 dark:border-gray-700 shadow-sm flex flex-col gap-5">
-
-          {/* Map status */}
-          <div>
-            <h3 className="text-xs font-medium text-gray-400 uppercase tracking-wider">Map</h3>
-            <div className="mt-1 flex items-center gap-2">
-              <span className={`inline-block w-2.5 h-2.5 rounded-full ${mapData ? 'bg-green-500' : 'bg-amber-500'}`} />
-              <span className="font-semibold text-sm text-gray-800 dark:text-white">
-                {mapData ? 'Loaded' : 'Not loaded'}
-              </span>
-            </div>
-            <p className="mt-1.5 text-xs font-mono text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-900/50 p-2 rounded-lg border border-gray-100 dark:border-gray-800 break-words">
-              {mapInfo}
-            </p>
-          </div>
-
-          {/* Nav status */}
-          <div>
-            <h3 className="text-xs font-medium text-gray-400 uppercase tracking-wider">Navigation</h3>
-            <div className="mt-1 flex items-center justify-between">
-              <p className="font-semibold text-sm text-gray-800 dark:text-white flex items-center gap-2">
-                <span className={`inline-block w-2.5 h-2.5 rounded-full ${dotColor}`} />
-                {navStatus}
-              </p>
-              {isActive && (
-                <button
-                  onClick={handleCancelNav}
-                  className="text-xs bg-red-100 hover:bg-red-200 text-red-700 dark:bg-red-900/30 dark:text-red-400 px-2 py-1 rounded cursor-pointer"
-                >
-                  Cancel
-                </button>
-              )}
-            </div>
-            <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-              Double-click the map to set a waypoint.
-            </p>
-          </div>
-
-          {/* Dock status */}
-          <div>
-            <h3 className="text-xs font-medium text-gray-400 uppercase tracking-wider">
-              Dock Status
-              <span className="ml-1 text-gray-300 dark:text-gray-600 normal-case">(manual override)</span>
-            </h3>
-            <div className="mt-1 flex items-center justify-between">
-              <span className="text-sm font-medium text-gray-700 dark:text-gray-300">
-                {isDocked ? 'Docked — will undock on nav' : 'Free to move'}
-              </span>
-              <button
-                onClick={() => setIsDocked(!isDocked)}
-                title="Toggle manually if docked status was not set automatically"
-                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none cursor-pointer ${
-                  isDocked ? 'bg-blue-600' : 'bg-gray-300 dark:bg-gray-600'
-                }`}
-              >
-                <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${isDocked ? 'translate-x-6' : 'translate-x-1'}`} />
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {/* Map canvas */}
-        <div className="lg:col-span-3 bg-white dark:bg-gray-800 p-4 rounded-xl border border-gray-100 dark:border-gray-700 shadow-sm">
           {mapData ? (
-            <MapRenderer
-              mapData={mapData}
-              onMapDoubleClick={handleMapDoubleClick}
-              targetPose={targetPose}
-            />
+            <div className="grid grid-cols-2 gap-3">
+              <Readout
+                label="Size"
+                value={`${mapData.info.width}×${mapData.info.height}`}
+                unit="px"
+              />
+              <Readout
+                label="Resolution"
+                value={(mapData.info.resolution * 100).toFixed(1)}
+                unit="cm/px"
+              />
+            </div>
           ) : (
-            <div className="w-full h-[550px] bg-gray-50 dark:bg-gray-950 rounded-lg border-2 border-dashed border-gray-200 dark:border-gray-800 flex flex-col items-center justify-center p-6 text-center">
-              <div className="text-4xl mb-3">🗺️</div>
-              <h3 className="text-lg font-semibold text-gray-800 dark:text-slate-200">
-                {loading ? 'Connecting to map…' : 'No Map Stream Active'}
-              </h3>
-              {!loading && (
-                <p className="text-sm text-gray-500 dark:text-gray-400 max-w-sm mt-1 mb-4">
-                  Map will load automatically. Click Refresh if it doesn't appear.
-                </p>
+            <p className="text-xs text-faint">
+              {isConnected ? 'Waiting for the occupancy grid…' : 'No link to the robot.'}
+            </p>
+          )}
+        </Panel>
+
+        <Panel title="Navigation">
+          <div className="flex flex-col gap-3">
+            <div className="flex items-center justify-between gap-2">
+              <StatusLine tone={status.tone} label={status.label} pulse={isBusy} />
+              {isBusy && (
+                <Button size="sm" variant="danger" onClick={handleCancel}>
+                  <StopIcon size={13} /> Stop
+                </Button>
               )}
             </div>
-          )}
-        </div>
+
+            {status.kind === 'navigating' && distanceRemaining !== null && (
+              <div className="flex flex-col gap-1.5 border-t border-edge pt-3">
+                <Readout label="Remaining" value={distanceRemaining.toFixed(2)} unit="m" />
+                <Meter fraction={progress} />
+              </div>
+            )}
+
+            {target && (
+              <div className="border-t border-edge pt-3">
+                <Readout
+                  label="Target"
+                  value={`${target.x.toFixed(2)}, ${target.y.toFixed(2)}`}
+                  unit="m"
+                />
+              </div>
+            )}
+
+            <p className="border-t border-edge pt-3 text-[11px] leading-relaxed text-faint">
+              Double-click anywhere on the map to send the robot there.
+            </p>
+          </div>
+        </Panel>
+
+        {/* Dock state is operator-declared: nothing publishes it yet, and
+            navigating out of a dock without backing off first fails. */}
+        <Panel title="Dock state">
+          <label className="flex items-center justify-between gap-3">
+            <span className="flex flex-col">
+              <span className="text-[13px] font-medium">
+                {isDocked ? 'On the dock' : 'Free to move'}
+              </span>
+              <span className="text-[11px] text-faint">
+                {isDocked
+                  ? 'The robot will back out before navigating.'
+                  : 'Goals are sent directly.'}
+              </span>
+            </span>
+            <button
+              role="switch"
+              aria-checked={isDocked}
+              aria-label="Robot is on the dock"
+              onClick={() => setIsDocked((value) => !value)}
+              className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${
+                isDocked ? 'bg-accent' : 'bg-edge-strong'
+              }`}
+            >
+              {/* left-0.5 is load-bearing: without an explicit inset the knob
+                  takes its static position from the button's centred text
+                  alignment and sits mid-track in both states. */}
+              <span
+                className={`absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${
+                  isDocked ? 'translate-x-4' : 'translate-x-0'
+                }`}
+              />
+            </button>
+          </label>
+        </Panel>
+
+        {!isConnected && (
+          <Badge tone="warn" className="justify-center py-1.5">No link to the robot</Badge>
+        )}
       </div>
+
+      {/* Map */}
+      <Panel flush className="min-h-[420px] overflow-hidden lg:h-full">
+        {mapData ? (
+          <MapRenderer
+            mapData={mapData}
+            onWaypoint={handleWaypoint}
+            targetPose={target}
+          />
+        ) : (
+          <EmptyState
+            icon={<MapIcon size={24} />}
+            title={isConnected ? 'No map received' : 'Waiting for the ROS bridge'}
+            hint={
+              isConnected
+                ? 'The grid arrives once map_server or SLAM is publishing on /map. Refresh to request it again.'
+                : 'The map appears as soon as the link comes up.'
+            }
+          />
+        )}
+      </Panel>
     </div>
   );
 }

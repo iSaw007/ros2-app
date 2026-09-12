@@ -1,149 +1,143 @@
 import React, { useEffect, useState } from 'react';
-import { Link, useNavigate } from 'react-router';
+import { Link } from 'react-router';
 import { useRosStatus } from '../context/RosStatusContext';
-import { subscribeToPose, unsubscribeFromPose } from '../services/telemetryService';
+import { subscribeToPose, getLastPose } from '../services/telemetryService';
+import { Panel } from '../components/ui/Panel';
+import { Button } from '../components/ui/Button';
+import { Readout, StatusLine, EmptyState } from '../components/ui/Indicators';
+import { DockIcon, MapIcon, TeleopIcon, LinkOffIcon } from '../components/ui/Icons';
 
-// Small SVG compass rose showing the robot heading
-function CompassRose({ yaw }) {
-  const deg = (yaw * 180) / Math.PI;
+/** Heading dial. A ring, a tick at north, and a needle — nothing else. */
+function HeadingDial({ yaw }) {
+  const degrees = (yaw * 180) / Math.PI;
   return (
-    <svg viewBox="0 0 40 40" className="w-10 h-10">
-      <circle cx="20" cy="20" r="18" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-gray-300 dark:text-gray-600" />
-      {/* Arrow pointing in heading direction */}
-      <g transform={`rotate(${-deg}, 20, 20)`}>
-        <polygon points="20,4 16,26 20,22 24,26" fill="#3b82f6" />
-        <polygon points="20,36 16,14 20,18 24,14" fill="#94a3b8" />
+    <svg viewBox="0 0 64 64" className="h-16 w-16 shrink-0" aria-hidden="true">
+      <circle cx="32" cy="32" r="27" fill="none" stroke="currentColor" strokeWidth="1" className="text-edge-strong" />
+      {/* Cardinal ticks */}
+      {[0, 90, 180, 270].map((angle) => (
+        <line
+          key={angle}
+          x1="32" y1="7" x2="32" y2={angle === 0 ? 14 : 12}
+          stroke="currentColor" strokeWidth={angle === 0 ? 1.75 : 1}
+          className={angle === 0 ? 'text-muted' : 'text-edge-strong'}
+          transform={`rotate(${angle} 32 32)`}
+        />
+      ))}
+      {/* Needle. Negative rotation: yaw is counter-clockwise, SVG is clockwise. */}
+      <g transform={`rotate(${-degrees} 32 32)`}>
+        <path d="M32 11 L37 38 L32 34 L27 38 Z" fill="currentColor" className="text-accent" />
       </g>
-      <circle cx="20" cy="20" r="2" fill="#3b82f6" />
+      <circle cx="32" cy="32" r="2.5" fill="currentColor" className="text-accent" />
     </svg>
   );
 }
 
-const quickLinks = [
-  { title: 'Teleop', to: '/teleop', description: 'Drive the robot and watch the camera stream.', icon: '🎮' },
-  { title: 'Navigation', to: '/navigation', description: 'Click the map and send a waypoint goal.', icon: '🗺️' },
-  { title: 'Docking', to: '/docking', description: 'Trigger the autonomous docking action.', icon: '🔌' },
+const modes = [
+  { to: '/teleop', name: 'Teleop', icon: <TeleopIcon size={20} />, description: 'Drive the robot by hand, with the camera feed and an emergency stop.' },
+  { to: '/navigation', name: 'Navigation', icon: <MapIcon size={20} />, description: 'Place a waypoint on the occupancy grid and let Nav2 drive there.' },
+  { to: '/docking', name: 'Docking', icon: <DockIcon size={20} />, description: 'Run the autonomous marker-guided docking mission and watch it progress.' },
 ];
 
+/** Elapsed time as HH:MM:SS. */
+const formatElapsed = (ms) => {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const h = String(Math.floor(total / 3600)).padStart(2, '0');
+  const m = String(Math.floor((total % 3600) / 60)).padStart(2, '0');
+  const s = String(total % 60).padStart(2, '0');
+  return `${h}:${m}:${s}`;
+};
+
+const linkStates = {
+  connected:    { tone: 'ok',     label: 'Connected' },
+  connecting:   { tone: 'warn',   label: 'Reconnecting' },
+  disconnected: { tone: 'danger', label: 'Disconnected' },
+};
+
 export default function Overview() {
-  const navigate = useNavigate();
-  const { status, isConnected } = useRosStatus();
-  const [pose, setPose] = useState(null);
-  const [uptimeS, setUptimeS] = useState(0);
+  const { status, isConnected, connectedSince, url, reconnect } = useRosStatus();
+  const [pose, setPose] = useState(getLastPose);
+  const [now, setNow] = useState(Date.now());
 
-  // Subscribe to robot pose
-  useEffect(() => {
-    subscribeToPose((x, y, yaw) => setPose({ x, y, yaw }));
-    return () => unsubscribeFromPose();
-  }, []);
+  useEffect(() => subscribeToPose(setPose), []);
 
-  // Uptime counter — resets when connection drops
+  // Drives the uptime readout. One timer, only while the link is actually up.
   useEffect(() => {
-    if (!isConnected) { setUptimeS(0); return; }
-    const id = setInterval(() => setUptimeS(s => s + 1), 1000);
+    if (!connectedSince) return undefined;
+    const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
-  }, [isConnected]);
+  }, [connectedSince]);
 
-  const formatUptime = (s) => {
-    const h = Math.floor(s / 3600).toString().padStart(2, '0');
-    const m = Math.floor((s % 3600) / 60).toString().padStart(2, '0');
-    const sec = (s % 60).toString().padStart(2, '0');
-    return `${h}:${m}:${sec}`;
-  };
-
-  const statusConfig = {
-    connected:    { label: 'Connected',     dot: 'bg-green-500',          card: 'border-green-100 dark:border-green-900',  text: 'text-green-700 dark:text-green-300' },
-    connecting:   { label: 'Reconnecting…', dot: 'bg-amber-400 animate-pulse', card: 'border-amber-100 dark:border-amber-900', text: 'text-amber-700 dark:text-amber-300' },
-    disconnected: { label: 'Offline',       dot: 'bg-red-500',            card: 'border-red-100 dark:border-red-900',    text: 'text-red-700 dark:text-red-300' },
-  }[status];
+  const link = linkStates[status];
 
   return (
-    <div className="space-y-6">
-      {/* Live telemetry grid */}
-      <div className="grid gap-4 md:grid-cols-3">
+    <div className="mx-auto flex max-w-5xl flex-col gap-3">
+      <div className="grid gap-3 md:grid-cols-2">
+        {/* Link. This is the panel that explains every other panel being empty,
+            so it carries the address and a manual retry, not just a light. */}
+        <Panel title="ROS bridge">
+          <div className="flex flex-col gap-3">
+            <div className="flex items-start justify-between gap-3">
+              <StatusLine tone={link.tone} label={link.label} pulse={status === 'connecting'} />
+              <Button size="sm" onClick={reconnect} disabled={isConnected}>
+                Reconnect
+              </Button>
+            </div>
+            <div className="grid grid-cols-2 gap-3 border-t border-edge pt-3">
+              <div className="flex flex-col gap-1">
+                <span className="field-label">Endpoint</span>
+                <span className="tnum truncate text-[12px] text-muted" title={url}>{url}</span>
+              </div>
+              <Readout
+                label="Link uptime"
+                value={connectedSince ? formatElapsed(now - connectedSince) : '--:--:--'}
+              />
+            </div>
+          </div>
+        </Panel>
 
-        {/* Pose card */}
-        <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-gray-900">
-          <p className="text-xs font-medium uppercase tracking-widest text-gray-400 dark:text-gray-500">Robot Pose</p>
+        {/* Pose, as estimated by AMCL. */}
+        <Panel title="Estimated pose">
           {pose ? (
-            <div className="mt-3 flex items-center gap-4">
-              <CompassRose yaw={pose.yaw} />
-              <div className="font-mono text-sm text-gray-800 dark:text-gray-200 space-y-0.5">
-                <div>X: <span className="text-blue-600 dark:text-blue-400">{pose.x.toFixed(3)}</span> m</div>
-                <div>Y: <span className="text-blue-600 dark:text-blue-400">{pose.y.toFixed(3)}</span> m</div>
-                <div>Yaw: <span className="text-blue-600 dark:text-blue-400">{pose.yaw.toFixed(3)}</span> rad</div>
+            <div className="flex items-center gap-5">
+              <HeadingDial yaw={pose.yaw} />
+              <div className="grid flex-1 grid-cols-3 gap-3">
+                <Readout label="X" value={pose.x.toFixed(2)} unit="m" />
+                <Readout label="Y" value={pose.y.toFixed(2)} unit="m" />
+                <Readout label="Yaw" value={pose.yaw.toFixed(2)} unit="rad" />
               </div>
             </div>
           ) : (
-            <p className="mt-3 text-sm text-gray-400 dark:text-gray-500">
-              {isConnected ? 'Waiting for pose…' : 'No connection'}
-            </p>
+            <EmptyState
+              icon={<LinkOffIcon size={22} />}
+              title={isConnected ? 'No pose published yet' : 'Waiting for the robot'}
+              hint={
+                isConnected
+                  ? 'AMCL publishes a pose once localisation is running and the robot has moved.'
+                  : 'Pose appears once the ROS bridge connects.'
+              }
+            />
           )}
-        </div>
-
-        {/* Connection card */}
-        <div className={`rounded-2xl border bg-white p-5 shadow-sm dark:bg-gray-900 ${statusConfig.card}`}>
-          <p className="text-xs font-medium uppercase tracking-widest text-gray-400 dark:text-gray-500">ROS Bridge</p>
-          <div className="mt-3 flex items-center gap-2">
-            <span className={`inline-block h-2.5 w-2.5 rounded-full ${statusConfig.dot}`} />
-            <span className={`font-semibold ${statusConfig.text}`}>{statusConfig.label}</span>
-          </div>
-          <p className="mt-2 font-mono text-xs text-gray-500 dark:text-gray-400 truncate">
-            {import.meta.env.VITE_ROS_BRIDGE_IP}:9090
-          </p>
-          {isConnected && (
-            <p className="mt-1 font-mono text-xs text-gray-400 dark:text-gray-500">
-              Uptime: {formatUptime(uptimeS)}
-            </p>
-          )}
-        </div>
-
-        {/* Quick actions card */}
-        <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-gray-900 flex flex-col justify-between">
-          <p className="text-xs font-medium uppercase tracking-widest text-gray-400 dark:text-gray-500">Quick Actions</p>
-          <div className="mt-4 flex flex-col gap-2">
-            <button
-              onClick={() => navigate('/teleop')}
-              className="w-full rounded-lg bg-blue-600 py-2 text-sm font-semibold text-white transition hover:bg-blue-700"
-            >
-              🎮 Drive
-            </button>
-            <button
-              onClick={() => navigate('/docking')}
-              className="w-full rounded-lg bg-gray-100 dark:bg-gray-800 py-2 text-sm font-semibold text-gray-800 dark:text-gray-200 transition hover:bg-gray-200 dark:hover:bg-gray-700"
-            >
-              🔌 Dock
-            </button>
-          </div>
-        </div>
+        </Panel>
       </div>
 
-      {/* Page description */}
-      <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-900">
-        <p className="text-sm font-medium uppercase tracking-[0.2em] text-blue-600">Robot Control Station</p>
-        <h1 className="mt-2 text-3xl font-bold text-gray-900 dark:text-white">
-          Teleop, navigation, and docking in one place.
-        </h1>
-        <p className="mt-3 max-w-2xl text-sm leading-6 text-gray-600 dark:text-gray-400">
-          Use Teleop for manual driving, Navigation for map clicks and waypoint goals,
-          and Docking for the autonomous visual docking mission.
-        </p>
-      </section>
-
-      {/* Quick-link cards */}
-      <section className="grid gap-4 md:grid-cols-3">
-        {quickLinks.map((link) => (
-          <Link
-            key={link.to}
-            to={link.to}
-            className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md dark:border-gray-800 dark:bg-gray-900"
-          >
-            <div className="text-2xl mb-2">{link.icon}</div>
-            <h2 className="text-lg font-semibold text-gray-900 dark:text-white">{link.title}</h2>
-            <p className="mt-2 text-sm text-gray-600 dark:text-gray-400">{link.description}</p>
-          </Link>
-        ))}
-      </section>
+      <Panel title="Modes" flush>
+        <ul className="divide-y divide-edge">
+          {modes.map((mode) => (
+            <li key={mode.to}>
+              <Link
+                to={mode.to}
+                className="flex items-center gap-3 px-3 py-3 transition-colors hover:bg-sunken"
+              >
+                <span className="text-muted">{mode.icon}</span>
+                <span className="flex min-w-0 flex-col">
+                  <span className="text-[13px] font-semibold">{mode.name}</span>
+                  <span className="text-xs text-faint">{mode.description}</span>
+                </span>
+              </Link>
+            </li>
+          ))}
+        </ul>
+      </Panel>
     </div>
   );
 }

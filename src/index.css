@@ -1,7 +1,104 @@
-@import url("https://fonts.googleapis.com/css2?family=Outfit:wght@100..900&display=swap") layer(base);
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap")
+  layer(base);
 @import "tailwindcss";
 
 @custom-variant dark (&:is(.dark *));
+
+/* ---------------------------------------------------------------------------
+   Palette
+   ---------------------------------------------------------------------------
+   This is a control station for a physical machine, so colour carries meaning
+   rather than decoration: the interface is built from neutrals, and saturated
+   colour is reserved for state the operator must be able to read at a glance —
+   connection health, mission progress, and anything that moves the robot.
+
+   Both themes are defined here as raw variables; the @theme block below maps
+   them onto Tailwind utilities once, so no component ever hard-codes a colour.
+   --------------------------------------------------------------------------- */
+
+:root {
+  --app-bg: #f5f6f8;
+  --app-surface: #ffffff;
+  --app-surface-sunken: #f0f2f5;
+  --app-border: #e2e6eb;
+  --app-border-strong: #cbd2da;
+  --app-text: #131820;
+  --app-text-muted: #58616d;
+  --app-text-faint: #8a939f;
+
+  --app-accent: #2563eb;
+  --app-accent-hover: #1d4ed8;
+  --app-accent-soft: #e8effc;
+  --app-accent-fg: #ffffff;
+
+  --app-ok: #15803d;
+  --app-ok-soft: #e7f6ec;
+  --app-warn: #b45309;
+  --app-warn-soft: #fdf3e3;
+  --app-danger: #c62828;
+  --app-danger-hover: #a51f1f;
+  --app-danger-soft: #fdecec;
+
+  /* The map canvas keeps one fixed dark palette in both themes: an occupancy
+     grid that inverts with the UI theme is disorienting to read. */
+  --map-void: #0b0e12;
+  --map-free: #f2f4f7;
+  --map-occupied: #1b2430;
+  --map-unknown: #949eab;
+}
+
+.dark {
+  --app-bg: #0c0f13;
+  --app-surface: #13171d;
+  --app-surface-sunken: #0f1318;
+  --app-border: #232931;
+  --app-border-strong: #333b45;
+  --app-text: #e7ebf0;
+  --app-text-muted: #98a2ae;
+  --app-text-faint: #69737f;
+
+  --app-accent: #3b82f6;
+  --app-accent-hover: #2f6fd8;
+  --app-accent-soft: #16233a;
+  --app-accent-fg: #ffffff;
+
+  --app-ok: #34d07f;
+  --app-ok-soft: #11261c;
+  --app-warn: #f0a132;
+  --app-warn-soft: #2a1f10;
+  --app-danger: #f26060;
+  --app-danger-hover: #d94b4b;
+  --app-danger-soft: #2b1414;
+}
+
+@theme {
+  --color-bg: var(--app-bg);
+  --color-surface: var(--app-surface);
+  --color-sunken: var(--app-surface-sunken);
+  --color-edge: var(--app-border);
+  --color-edge-strong: var(--app-border-strong);
+  --color-ink: var(--app-text);
+  --color-muted: var(--app-text-muted);
+  --color-faint: var(--app-text-faint);
+
+  --color-accent: var(--app-accent);
+  --color-accent-hover: var(--app-accent-hover);
+  --color-accent-soft: var(--app-accent-soft);
+  --color-accent-fg: var(--app-accent-fg);
+
+  --color-ok: var(--app-ok);
+  --color-ok-soft: var(--app-ok-soft);
+  --color-warn: var(--app-warn);
+  --color-warn-soft: var(--app-warn-soft);
+  --color-danger: var(--app-danger);
+  --color-danger-hover: var(--app-danger-hover);
+  --color-danger-soft: var(--app-danger-soft);
+
+  --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --radius-panel: 6px;
+}
 
 @layer base {
   html,
@@ -10,21 +107,54 @@
     min-height: 100%;
   }
 
-  *,
-  ::after,
-  ::before,
-  ::backdrop,
-  ::file-selector-button {
-    border-color: theme(colors.gray.200);
+  * {
+    border-color: var(--app-border);
   }
 
   body {
-    font-family: "Outfit", sans-serif;
-    @apply relative bg-gray-50 font-normal;
+    background-color: var(--app-bg);
+    color: var(--app-text);
+    font-family: var(--font-sans);
+    font-feature-settings: "cv05", "ss01";
+    -webkit-font-smoothing: antialiased;
   }
 
   button:not(:disabled),
   [role="button"]:not(:disabled) {
     cursor: pointer;
+  }
+
+  /* Every measured quantity is monospaced and tabular, so a digit changing
+     never shifts the layout underneath the operator's eye. */
+  .tnum {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--app-accent);
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  /* A label above a value or a section: short, upper-case, low-contrast. */
+  .field-label {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--app-text-faint);
+  }
+}
+
+/* Respect the operator's motion preference — several indicators pulse. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }

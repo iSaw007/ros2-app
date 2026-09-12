@@ -1,19 +1,24 @@
 import { Link } from "react-router";
+import { Panel } from "../../components/ui/Panel";
 
 export default function NotFound() {
   return (
-    <div className="flex min-h-[60vh] flex-col items-center justify-center gap-4 rounded-2xl border border-dashed border-gray-200 bg-white p-8 text-center dark:border-gray-800 dark:bg-gray-900">
-      <p className="text-sm font-semibold uppercase tracking-[0.2em] text-blue-600">404</p>
-      <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Page not found</h1>
-      <p className="max-w-md text-sm text-gray-600 dark:text-gray-400">
-        The route you opened does not exist in the robot control app.
-      </p>
-      <Link
-        to="/"
-        className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-700"
-      >
-        Back to Overview
-      </Link>
+    <div className="mx-auto max-w-md pt-10">
+      <Panel>
+        <div className="flex flex-col items-center gap-3 py-6 text-center">
+          <p className="tnum text-[11px] font-semibold tracking-[0.18em] text-faint">404</p>
+          <h1 className="text-base font-semibold">No such page</h1>
+          <p className="max-w-sm text-xs leading-relaxed text-muted">
+            This route is not part of the control station.
+          </p>
+          <Link
+            to="/"
+            className="mt-1 rounded-[5px] border border-transparent bg-accent px-3 py-2 text-[13px] font-medium text-accent-fg transition-colors hover:bg-accent-hover"
+          >
+            Back to overview
+          </Link>
+        </div>
+      </Panel>
     </div>
   );
 }

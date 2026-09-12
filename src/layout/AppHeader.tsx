@@ -1,91 +1,75 @@
-import { Link, useLocation } from "react-router";
+import { useLocation } from "react-router";
 import { ThemeToggleButton } from "../components/common/ThemeToggleButton";
 import { useSidebar } from "../context/SidebarContext";
 import { useRosStatus } from "../context/RosStatusContext";
+import { useCameraDock } from "../context/CameraDockContext";
+import { IconButton } from "../components/ui/Button";
+import { CameraIcon, CameraOffIcon, CloseIcon, MenuIcon } from "../components/ui/Icons";
+import { StatusLine, type Tone } from "../components/ui/Indicators";
 
-const titleByPath: Record<string, string> = {
-  "/": "Robot Overview",
+const pageTitles: Record<string, string> = {
+  "/": "Overview",
   "/teleop": "Teleop",
   "/navigation": "Navigation",
   "/docking": "Docking",
 };
 
-const ConnectionPill: React.FC = () => {
-  const { status } = useRosStatus();
-
-  const config = {
-    connected:    { dot: "bg-green-500",                        label: "Connected",     border: "border-green-200 dark:border-green-800",  text: "text-green-700 dark:text-green-300" },
-    connecting:   { dot: "bg-amber-400 animate-pulse",          label: "Reconnecting…", border: "border-amber-200 dark:border-amber-800",   text: "text-amber-700 dark:text-amber-300" },
-    disconnected: { dot: "bg-red-500",                          label: "Offline",       border: "border-red-200 dark:border-red-800",      text: "text-red-700 dark:text-red-300" },
-  }[status];
-
-  return (
-    <span className={`hidden items-center gap-1.5 rounded-full border bg-gray-50 px-3 py-1 text-xs font-medium dark:bg-gray-800 sm:inline-flex ${config.border} ${config.text}`}>
-      <span className={`inline-block h-2 w-2 rounded-full ${config.dot}`} />
-      {config.label}
-    </span>
-  );
+const linkState: Record<string, { tone: Tone; label: string; pulse: boolean }> = {
+  connected: { tone: "ok", label: "Link up", pulse: false },
+  connecting: { tone: "warn", label: "Reconnecting", pulse: true },
+  disconnected: { tone: "danger", label: "Link down", pulse: false },
 };
 
 const AppHeader: React.FC = () => {
   const { isMobileOpen, toggleSidebar, toggleMobileSidebar } = useSidebar();
   const location = useLocation();
-  const pageTitle = titleByPath[location.pathname] ?? "Robot Control";
+  const { status, url } = useRosStatus();
+  const { isOpen: cameraOpen, toggle: toggleCamera } = useCameraDock();
+
+  // The teleop page is the camera, so offering a corner copy of it there would
+  // just open a second stream of the same pictures.
+  const cameraToggleApplies = location.pathname !== "/teleop";
+
+  const title = pageTitles[location.pathname] ?? "Robot Control";
+  const link = linkState[status];
 
   const handleToggle = () => {
-    if (window.innerWidth >= 1024) {
-      toggleSidebar();
-      return;
-    }
-    toggleMobileSidebar();
+    if (window.innerWidth >= 1024) toggleSidebar();
+    else toggleMobileSidebar();
   };
 
   return (
-    <header className="sticky top-0 z-50 w-full border-b border-gray-200 bg-white/95 backdrop-blur dark:border-gray-800 dark:bg-gray-900/95">
-      <div className="flex items-center justify-between gap-3 px-3 py-3 sm:px-4 lg:px-6 lg:py-4">
-        <div className="flex items-center gap-3">
-          <button
-            className="flex h-10 w-10 items-center justify-center rounded-lg border border-gray-200 text-gray-500 transition hover:bg-gray-100 dark:border-gray-800 dark:text-gray-400 dark:hover:bg-gray-800 lg:h-11 lg:w-11"
-            onClick={handleToggle}
-            aria-label="Toggle Sidebar"
+    <header className="sticky top-0 z-40 flex h-12 shrink-0 items-center justify-between gap-3 border-b border-edge bg-surface px-3">
+      <div className="flex min-w-0 items-center gap-2.5">
+        <IconButton
+          label={isMobileOpen ? "Close navigation" : "Toggle navigation"}
+          variant="ghost"
+          onClick={handleToggle}
+        >
+          {isMobileOpen ? <CloseIcon /> : <MenuIcon />}
+        </IconButton>
+        <h1 className="truncate text-[13px] font-semibold tracking-tight">{title}</h1>
+      </div>
+
+      <div className="flex items-center gap-3">
+        {/* The bridge address is worth keeping permanently visible: it is the
+            first thing to check when the link will not come up. */}
+        <span className="tnum hidden text-[11px] text-faint md:inline">{url}</span>
+        <StatusLine tone={link.tone} label={link.label} pulse={link.pulse} />
+        {cameraToggleApplies && (
+          <IconButton
+            label={cameraOpen ? "Hide camera" : "Show camera"}
+            variant="ghost"
+            onClick={toggleCamera}
+            className={cameraOpen ? "text-accent" : undefined}
           >
-            {isMobileOpen ? (
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-                <path
-                  fillRule="evenodd"
-                  clipRule="evenodd"
-                  d="M6.21967 7.28131C5.92678 6.98841 5.92678 6.51354 6.21967 6.22065C6.51256 5.92775 6.98744 5.92775 7.28033 6.22065L11.999 10.9393L16.7176 6.22078C17.0105 5.92789 17.4854 5.92788 17.7782 6.22078C18.0711 6.51367 18.0711 6.98855 17.7782 7.28144L13.0597 12L17.7782 16.7186C18.0711 17.0115 18.0711 17.4863 17.7782 17.7792C17.4854 18.0721 17.0105 18.0721 16.7176 17.7792L11.999 13.0607L7.28033 17.7794C6.98744 18.0722 6.51256 18.0722 6.21967 17.7794C5.92678 17.4865 5.92678 17.0116 6.21967 16.7187L10.9384 12L6.21967 7.28131Z"
-                  fill="currentColor"
-                />
-              </svg>
-            ) : (
-              <svg width="16" height="12" viewBox="0 0 16 12" fill="none">
-                <path
-                  fillRule="evenodd"
-                  clipRule="evenodd"
-                  d="M0.583252 1C0.583252 0.585788 0.919038 0.25 1.33325 0.25H14.6666C15.0808 0.25 15.4166 0.585786 15.4166 1C15.4166 1.41421 15.0808 1.75 14.6666 1.75L1.33325 1.75C0.919038 1.75 0.583252 1.41422 0.583252 1ZM0.583252 11C0.583252 10.5858 0.919038 10.25 1.33325 10.25L14.6666 10.25C15.0808 10.25 15.4166 10.5858 15.4166 11C15.4166 11.4142 15.0808 11.75 14.6666 11.75L1.33325 11.75C0.919038 11.75 0.583252 11.4142 0.583252 11ZM1.33325 5.25C0.919038 5.25 0.583252 5.58579 0.583252 6C0.583252 6.41421 0.919038 6.75 1.33325 6.75L7.99992 6.75C8.41413 6.75 8.74992 6.41421 8.74992 6C8.74992 5.58579 8.41413 5.25 7.99992 5.25L1.33325 5.25Z"
-                  fill="currentColor"
-                />
-              </svg>
-            )}
-          </button>
-
-          <div>
-            <Link to="/" className="block text-sm font-semibold text-gray-700 dark:text-gray-200">
-              Yahboom Robot
-            </Link>
-            <p className="text-xs text-gray-500 dark:text-gray-400">{pageTitle}</p>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-2">
-          <ConnectionPill />
-          <ThemeToggleButton />
-        </div>
+            {cameraOpen ? <CameraIcon /> : <CameraOffIcon />}
+          </IconButton>
+        )}
+        <ThemeToggleButton />
       </div>
     </header>
   );
 };
 
 export default AppHeader;
-
